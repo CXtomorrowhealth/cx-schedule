@@ -1671,6 +1671,10 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
   // that specific hour. OOO time (full-day or a partial OOO window) is excluded from both the
   // numerator and denominator for the hour(s) it actually overlaps — it isn't counted as coverage.
   const HEATMAP_HOURS = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+  // 8-9am and 5-8pm are low-volume — just 1 person on IB is fully staffed for those hours, so
+  // they get a binary covered/not-covered treatment instead of the % gradient used for the
+  // busier midday hours.
+  const SINGLE_COVERAGE_HOURS = [8, 17, 18, 19];
   const ibHourlyStats = (date, hour) => {
     const hourStart = hour * 60, hourEnd = (hour + 1) * 60;
     let working = 0, onIb = 0;
@@ -1701,7 +1705,7 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
 
   let lowest = null;
   weekdayDates.forEach((d) => {
-    HEATMAP_HOURS.forEach((hr) => {
+    HEATMAP_HOURS.filter((hr) => !SINGLE_COVERAGE_HOURS.includes(hr)).forEach((hr) => {
       const stats = ibHourlyStats(d, hr);
       if (stats.working > 0 && (!lowest || stats.pct < lowest.pct)) {
         lowest = { pct: stats.pct, date: d, hour: hr };
@@ -1745,24 +1749,40 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
               </tr>
             </thead>
             <tbody>
-              {HEATMAP_HOURS.map((hr) => (
-                <tr key={hr}>
-                  <td className="text-[10px] font-mono text-slate-500 pr-2 whitespace-nowrap">{fmtHourMark(hr)}</td>
-                  {weekdayDates.map((d) => {
-                    const stats = ibHourlyStats(d, hr);
-                    return (
-                      <td key={d} className="p-0.5">
-                        <div
-                          onMouseEnter={() => setHoveredCell(stats.working > 0 ? `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.pct}% (${stats.onIb}/${stats.working} on IB)` : `${fmtDate(d)} ${fmtHourMark(hr)} — nobody on shift`)}
-                          onMouseLeave={() => setHoveredCell(null)}
-                          className="h-7 rounded cursor-default transition-transform hover:scale-105"
-                          style={{ backgroundColor: stats.working > 0 ? heatColor(stats.pct, true) : "#f1f5f9" }}
-                        />
-                      </td>
-                    );
-                  })}
-                </tr>
-              ))}
+              {HEATMAP_HOURS.map((hr) => {
+                const singleCoverage = SINGLE_COVERAGE_HOURS.includes(hr);
+                return (
+                  <tr key={hr}>
+                    <td className="text-[10px] font-mono text-slate-500 pr-2 whitespace-nowrap">
+                      {fmtHourMark(hr)}{singleCoverage && <span className="text-slate-300"> ·1</span>}
+                    </td>
+                    {weekdayDates.map((d) => {
+                      const stats = ibHourlyStats(d, hr);
+                      const covered = stats.onIb >= 1;
+                      const color = stats.working === 0
+                        ? "#f1f5f9"
+                        : singleCoverage
+                          ? (covered ? TH.teal : "#e0685a")
+                          : heatColor(stats.pct, true);
+                      const detail = stats.working === 0
+                        ? `${fmtDate(d)} ${fmtHourMark(hr)} — nobody on shift`
+                        : singleCoverage
+                          ? `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.onIb}/${stats.working} on IB (just needs 1)`
+                          : `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.pct}% (${stats.onIb}/${stats.working} on IB)`;
+                      return (
+                        <td key={d} className="p-0.5">
+                          <div
+                            onMouseEnter={() => setHoveredCell(detail)}
+                            onMouseLeave={() => setHoveredCell(null)}
+                            className="h-7 rounded cursor-default transition-transform hover:scale-105"
+                            style={{ backgroundColor: color }}
+                          />
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -1771,6 +1791,7 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
             <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: heatColor(95, true) }} /> High</span>
             <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: heatColor(70, true) }} /> Mid</span>
             <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: heatColor(40, true) }} /> Low</span>
+            <span className="flex items-center gap-1 ml-2"><span className="text-slate-300">·1</span> = just needs 1 person (8-9am, 5-8pm)</span>
           </div>
           <span className="text-[11px] font-mono text-slate-500 h-4">{hoveredCell || "hover a cell for detail"}</span>
         </div>
