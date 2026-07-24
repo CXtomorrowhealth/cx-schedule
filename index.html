@@ -195,19 +195,24 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
         <div className="space-y-3">
           {dates.map((d) => {
             const c = cells[cellKey(me.id, d)] || emptyCell();
-            const st = STATUS[c.status] || STATUS[""];
             const today = isToday(d);
             const weekend = isWeekend(d);
-            const isEmpty = !c.status && (!c.tasks || c.tasks.length === 0) && !c.shiftStart && !c.shiftEnd;
+            const isEmpty = !c.status && (!c.tasks || c.tasks.length === 0) && !c.shiftStart && !c.shiftEnd && !(c.blocks && c.blocks.length);
             const showAsWeekend = weekend && isEmpty;
 
             const shiftStart = c.shiftStart || me.shiftStart || "08:00";
             const shiftEnd = c.shiftEnd || me.shiftEnd || "17:00";
-            const isFullDayStatus = c.status && c.statusScope !== "partial";
-            const isPartialStatus = c.status && c.statusScope === "partial";
             const hasTasks = c.tasks && c.tasks.length > 0;
             const dow = new Date(d + "T00:00:00").getDay();
             const isRegularWorkday = !me.workDays || me.workDays.length === 0 || me.workDays.includes(dow);
+
+            // Untouched cells (isEmpty) deliberately skip block derivation, so they fall through
+            // to the muted "usual shift" hint below instead of rendering as a confirmed day.
+            const blocks = isEmpty ? [] : getCellBlocks(c, me.shiftStart, me.shiftEnd);
+            const isNotScheduled = blocks.length === 1 && blocks[0].type === "NotScheduled";
+            const primaryBlock = blocks.find((b) => b.type !== "Working") || null;
+            const st = STATUS[primaryBlock ? primaryBlock.type : ""] || STATUS[""];
+            const hideTasksRow = isNotScheduled || (primaryBlock && !primaryBlock.start);
 
             return (
               <div
@@ -230,21 +235,19 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
                   </div>
                 )}
 
-                {isFullDayStatus ? (
-                  <TimelineBar label={st.label} start="08:00" end="20:00" color={STATUS_SOLID_HEX[c.status] || "#94a3b8"} />
-                ) : isPartialStatus ? (
-                  <>
-                    {subtractInterval(shiftStart, shiftEnd, c.statusStart, c.statusEnd).map(([segStart, segEnd], idx) => (
-                      <div key={idx} className={idx > 0 ? "mt-1" : ""}>
-                        <TimelineBar label={formatRange12h(segStart, segEnd)} start={segStart} end={segEnd} color={TH.teal} />
-                      </div>
-                    ))}
-                    <div className="mt-1">
-                      <TimelineBar label={st.label} start={c.statusStart} end={c.statusEnd} color={STATUS_SOLID_HEX[c.status] || "#94a3b8"} />
+                {blocks.length > 0 && !isNotScheduled ? (
+                  blocks.map((b, idx) => (
+                    <div key={b.id || idx} className={idx > 0 ? "mt-1" : ""}>
+                      <TimelineBar
+                        label={b.type === "Working" ? formatRange12h(b.start || shiftStart, b.end || shiftEnd) : blockLabel(b.type)}
+                        start={b.start || "08:00"}
+                        end={b.end || "20:00"}
+                        color={blockColor(b.type, TH.teal)}
+                      />
                     </div>
-                  </>
-                ) : hasTasks ? (
-                  <TimelineBar label={formatRange12h(shiftStart, shiftEnd)} start={shiftStart} end={shiftEnd} color={TH.teal} />
+                  ))
+                ) : isNotScheduled ? (
+                  <div className="text-xs text-slate-400 italic py-1.5">Not scheduled</div>
                 ) : isRegularWorkday && (me.shiftStart || me.shiftEnd) ? (
                   <TimelineBar label={`${formatRange12h(shiftStart, shiftEnd)} (usual)`} start={shiftStart} end={shiftEnd} color="#cbd5e1" />
                 ) : showAsWeekend ? (
@@ -253,7 +256,7 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
                   <div className="text-xs text-slate-400 italic py-1.5">Your schedule has not been set yet</div>
                 )}
 
-                {!isFullDayStatus && hasTasks && (
+                {!hideTasksRow && hasTasks && (
                   <div className="flex flex-wrap gap-1.5 mt-1.5">
                     {c.tasks.map((t) => (
                       <span key={t.id} className={`text-[11px] px-2 py-0.5 rounded border ${taskColor(t.name)}`}>
@@ -263,7 +266,7 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
                   </div>
                 )}
 
-                {c.status && c.coveredBy && (
+                {primaryBlock && c.coveredBy && (
                   <div className="flex items-center gap-1 text-xs text-slate-500 font-mono mt-1.5">
                     <UserCheck className="w-3 h-3" /> Covered by {c.coveredBy}
                   </div>
@@ -372,18 +375,11 @@ function subtractInterval(shiftStart, shiftEnd, cutStart, cutEnd) {
   return segments.map(([a, b]) => [minutesToHHMM(a), minutesToHHMM(b)]);
 }
 
-// The employee's actual on-the-clock windows for a cell — shift minus any OOO/PTO/etc.
-// A full-day status (no partial start/end) means not working at all that day. A partial
-// status only carves out its own window, leaving the rest of the shift as working time.
+// The employee's actual on-the-clock windows for a cell — every Working-type block's own
+// start/end. A day with no Working blocks at all (full-day OOO/PTO/etc.) returns none.
 function employeeWorkingWindows(cell, empShiftStart, empShiftEnd) {
-  const shiftStart = (cell && cell.shiftStart) || empShiftStart;
-  const shiftEnd = (cell && cell.shiftEnd) || empShiftEnd;
-  if (!shiftStart || !shiftEnd) return [];
-  if (!cell || !cell.status) return [[shiftStart, shiftEnd]];
-  if (cell.statusScope === "partial" && cell.statusStart && cell.statusEnd) {
-    return subtractInterval(shiftStart, shiftEnd, cell.statusStart, cell.statusEnd);
-  }
-  return []; // full-day absence
+  const blocks = getCellBlocks(cell, empShiftStart, empShiftEnd);
+  return blocks.filter((b) => b.type === "Working" && b.start && b.end).map((b) => [b.start, b.end]);
 }
 
 // Windows during which an "IB" task applies, before intersecting with actual working time.
@@ -615,8 +611,13 @@ function ensureQaEvalMonthly(dataObj) {
 
 // Cell shape: tasks is an array of { id, name, scope: 'allday'|'partial', start, end };
 // status carries its own scope/start/end so an absence can be "all day" or a specific window.
+// `blocks` (added later) is the newer timeline-editor shape — an ordered list of
+// { id, type: 'Working'|'OOO'|'PTO'|..., start, end }. It's `null` until a cell is opened in
+// the new editor; `deriveLegacyFieldsFromBlocks` keeps status/shiftStart/etc. in sync with it
+// so every other tab (Team Overview, coverage stats, employee view, time-off sync) keeps
+// reading the fields it already knows about, unchanged.
 function emptyCell() {
-  return { tasks: [], status: "", statusScope: "allday", statusStart: "", statusEnd: "", shiftStart: "", shiftEnd: "", hours: "", coveredBy: "" };
+  return { tasks: [], status: "", statusScope: "allday", statusStart: "", statusEnd: "", shiftStart: "", shiftEnd: "", hours: "", coveredBy: "", blocks: null };
 }
 
 function hoursBetween(start, end) {
@@ -648,8 +649,72 @@ function normalizeCell(c) {
     shiftEnd: c.shiftEnd || "",
     hours: c.hours || "",
     coveredBy: c.coveredBy || "",
+    blocks: Array.isArray(c.blocks) ? c.blocks : null,
   };
 }
+
+// A day's block types, in the order they appear as choices in the editor.
+const BLOCK_TYPES = ["Working", "OOO", "Sick", "Holiday", "FloatingHoliday", "LOA", "NotScheduled"];
+function blockLabel(type) { return type === "Working" ? "Working" : (STATUS[type]?.label || type); }
+function blockColor(type, workingColor) { return type === "Working" ? workingColor : (STATUS_SOLID_HEX[type] || "#94a3b8"); }
+
+// Returns this cell's ordered block list. Cells already edited under the new timeline editor
+// carry `cell.blocks` directly. Anything else (older data, or a cell nobody's opened in the new
+// editor yet) gets an equivalent block list derived on the fly from the legacy single-status
+// shape — no bulk data migration needed for existing schedules.
+function getCellBlocks(cell, empShiftStart, empShiftEnd) {
+  if (cell && Array.isArray(cell.blocks)) return cell.blocks;
+  const shiftStart = (cell && cell.shiftStart) || empShiftStart || "";
+  const shiftEnd = (cell && cell.shiftEnd) || empShiftEnd || "";
+  if (!cell || !cell.status) {
+    return [{ id: "b0", type: "Working", start: shiftStart, end: shiftEnd }];
+  }
+  if (cell.status === "NotScheduled") return [{ id: "b0", type: "NotScheduled", start: "", end: "" }];
+  // PTO is folded into OOO here — the block-type picker no longer offers PTO as a separate
+  // choice, so any older day still tagged PTO just opens as OOO instead of a dangling value.
+  const statusType = cell.status === "PTO" ? "OOO" : cell.status;
+  if (cell.statusScope === "partial" && cell.statusStart && cell.statusEnd) {
+    const working = subtractInterval(shiftStart, shiftEnd, cell.statusStart, cell.statusEnd);
+    return [
+      { id: "b0", type: statusType, start: cell.statusStart, end: cell.statusEnd },
+      ...working.map(([s, e], i) => ({ id: `w${i}`, type: "Working", start: s, end: e })),
+    ];
+  }
+  return [{ id: "b0", type: statusType, start: "", end: "" }];
+}
+
+// The inverse: boils an arbitrary block list back down into the older single-status fields, so
+// every tab that doesn't know about `blocks` yet keeps working exactly as before. If a day ends
+// up with more than one non-Working block (a rare case — e.g. OOO twice in one day), the FIRST
+// one wins for this summary; the full picture is still there when the day's reopened to edit.
+function deriveLegacyFieldsFromBlocks(blocks) {
+  if (!blocks || blocks.length === 0) {
+    return { status: "", statusScope: "allday", statusStart: "", statusEnd: "", shiftStart: "", shiftEnd: "", hours: "" };
+  }
+  if (blocks.length === 1 && blocks[0].type === "NotScheduled") {
+    return { status: "NotScheduled", statusScope: "allday", statusStart: "", statusEnd: "", shiftStart: "", shiftEnd: "", hours: "" };
+  }
+  const working = blocks.filter((b) => b.type === "Working");
+  const other = blocks.filter((b) => b.type !== "Working" && b.type !== "NotScheduled");
+  const starts = working.map((b) => b.start).filter(Boolean).sort();
+  const ends = working.map((b) => b.end).filter(Boolean).sort();
+  const shiftStart = starts[0] || "";
+  const shiftEnd = ends[ends.length - 1] || "";
+
+  if (other.length === 0) {
+    return { status: "", statusScope: "allday", statusStart: "", statusEnd: "", shiftStart, shiftEnd, hours: "" };
+  }
+  const primary = other[0];
+  const isPartial = !!(primary.start && primary.end);
+  return {
+    status: primary.type,
+    statusScope: isPartial ? "partial" : "allday",
+    statusStart: isPartial ? primary.start : "",
+    statusEnd: isPartial ? primary.end : "",
+    shiftStart, shiftEnd, hours: "",
+  };
+}
+
 
 function normalizeData(raw) {
   const cells = {};
@@ -1123,12 +1188,18 @@ function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, 
           const tc = teamColor(emp.team);
           const shiftStart = c.shiftStart || emp.shiftStart || "08:00";
           const shiftEnd = c.shiftEnd || emp.shiftEnd || "17:00";
-          const isFullDayStatus = c.status && c.status !== "NotScheduled" && c.statusScope !== "partial";
-          const isPartialStatus = c.status && c.statusScope === "partial";
           const hasTasks = c.tasks && c.tasks.length > 0;
           const dow = new Date(timelineDate + "T00:00:00").getDay();
           const isRegularWorkday = !emp.workDays || emp.workDays.length === 0 || emp.workDays.includes(dow);
           const loggedTimeOff = (timeOffDates || []).find((td) => td.empId === emp.id && td.date === timelineDate);
+
+          // A truly untouched cell (no status/blocks, no tasks) skips derivation, so it falls
+          // through to the muted "usual shift" hint instead of rendering as a confirmed day.
+          const isBlank = !c.status && !hasTasks && !(c.blocks && c.blocks.length);
+          const blocks = isBlank ? [] : getCellBlocks(c, emp.shiftStart, emp.shiftEnd);
+          const isNotScheduled = blocks.length === 1 && blocks[0].type === "NotScheduled";
+          const primaryBlock = blocks.find((b) => b.type !== "Working") || null;
+          const hideTasksRow = isNotScheduled || (primaryBlock && !primaryBlock.start);
           return (
             <div
               key={emp.id}
@@ -1146,45 +1217,27 @@ function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, 
                 )}
               </div>
               <div className="flex-1 min-w-0">
-                {c.status === "NotScheduled" ? (
+                {isNotScheduled ? (
                   <div className="text-slate-400 text-sm py-1.5">–</div>
-                ) : isFullDayStatus ? (
-                  <TimelineBar
-                    label={STATUS[c.status]?.label || c.status}
-                    start="08:00"
-                    end="20:00"
-                    color={STATUS_SOLID_HEX[c.status] || "#94a3b8"}
-                  />
-                ) : isPartialStatus ? (
-                  <>
-                    {subtractInterval(shiftStart, shiftEnd, c.statusStart, c.statusEnd).map(([segStart, segEnd], idx) => (
-                      <div key={idx} className={idx > 0 ? "mt-1" : ""}>
-                        <TimelineBar label={formatRange12h(segStart, segEnd)} start={segStart} end={segEnd} color={tc.accent} />
-                      </div>
-                    ))}
-                    <div className="mt-1">
+                ) : blocks.length > 0 ? (
+                  blocks.map((b, idx) => (
+                    <div key={b.id || idx} className={idx > 0 ? "mt-1" : ""}>
                       <TimelineBar
-                        label={STATUS[c.status]?.label || c.status}
-                        start={c.statusStart}
-                        end={c.statusEnd}
-                        color={STATUS_SOLID_HEX[c.status] || "#94a3b8"}
+                        label={b.type === "Working" ? formatRange12h(b.start || shiftStart, b.end || shiftEnd) : blockLabel(b.type)}
+                        start={b.start || "08:00"}
+                        end={b.end || "20:00"}
+                        color={blockColor(b.type, tc.accent)}
                       />
                     </div>
-                  </>
+                  ))
+                ) : isRegularWorkday ? (
+                  <TimelineBar label={`${formatRange12h(shiftStart, shiftEnd)} (usual)`} start={shiftStart} end={shiftEnd} color="#cbd5e1" />
                 ) : (
-                  <>
-                    {hasTasks ? (
-                      <TimelineBar label={formatRange12h(shiftStart, shiftEnd)} start={shiftStart} end={shiftEnd} color={tc.accent} />
-                    ) : isRegularWorkday ? (
-                      <TimelineBar label={`${formatRange12h(shiftStart, shiftEnd)} (usual)`} start={shiftStart} end={shiftEnd} color="#cbd5e1" />
-                    ) : (
-                      <div className="text-xs text-slate-400 italic py-1.5">
-                        Not a scheduled workday for {emp.name.split(" ")[0]}
-                      </div>
-                    )}
-                  </>
+                  <div className="text-xs text-slate-400 italic py-1.5">
+                    Not a scheduled workday for {emp.name.split(" ")[0]}
+                  </div>
                 )}
-                {!isFullDayStatus && c.status !== "NotScheduled" && hasTasks && (
+                {!hideTasksRow && hasTasks && (
                   <div className="flex flex-wrap gap-1 mt-1.5">
                     {c.tasks.map((t) => (
                       <span key={t.id} className={`text-[10px] px-1.5 py-0.5 rounded border ${taskColor(t.name)}`}>
@@ -3712,6 +3765,13 @@ export default function ManagerSchedule() {
     persist(next);
   };
 
+  // Saves a new block list for a day AND, in the same write, boils it down into the legacy
+  // status/shiftStart/etc. fields — so Team Overview, coverage stats, the employee's own view,
+  // and time-off sync all keep reading data that's actually current, with no separate sync step.
+  const updateBlocks = (empId, date, newBlocks) => {
+    updateCell(empId, date, { blocks: newBlocks, ...deriveLegacyFieldsFromBlocks(newBlocks) });
+  };
+
   // Adding several tasks at once (multi-select in TaskBuilder) must go through ONE persist
   // call — calling this in a loop per task would have each call read the same stale `cells`
   // closure, so only the last task actually stuck. This is that fix — always call it with
@@ -3733,7 +3793,11 @@ export default function ManagerSchedule() {
     const sourceCell = cells[cellKey(empId, sourceDate)] || emptyCell();
     const nextCells = { ...cells };
     targetDates.forEach((d) => {
-      nextCells[cellKey(empId, d)] = { ...sourceCell, tasks: sourceCell.tasks.map((t) => ({ ...t })) };
+      nextCells[cellKey(empId, d)] = {
+        ...sourceCell,
+        tasks: sourceCell.tasks.map((t) => ({ ...t })),
+        blocks: Array.isArray(sourceCell.blocks) ? sourceCell.blocks.map((b) => ({ ...b })) : sourceCell.blocks,
+      };
     });
     persist({ ...data, cells: nextCells, updatedAt: Date.now() });
   };
@@ -3978,8 +4042,11 @@ export default function ManagerSchedule() {
     persist({ ...data, holidays: nextHolidays, updatedAt: Date.now() });
   };
 
-  const editCell = editing ? (cells[cellKey(editing.empId, editing.date)] || emptyCell()) : null;
   const editEmp = editing ? employees.find((e) => e.id === editing.empId) : null;
+  const editCell = editing ? (() => {
+    const raw = cells[cellKey(editing.empId, editing.date)] || emptyCell();
+    return { ...raw, blocks: getCellBlocks(raw, editEmp?.shiftStart, editEmp?.shiftEnd) };
+  })() : null;
 
   return (
     <div className="min-h-screen bg-white" style={{ color: TH.text, fontFamily: "'Inter', sans-serif" }}>
@@ -4344,79 +4411,106 @@ export default function ManagerSchedule() {
               </div>
             )}
 
-            <label className="block text-xs text-slate-500 mb-1.5">Status</label>
-            <div className="flex flex-wrap gap-2 mb-4">
-              {Object.entries(STATUS).map(([k, v]) => (
-                <button
-                  key={k}
-                  onClick={() => updateCell(editing.empId, editing.date, { status: k })}
-                  className={`text-xs px-2.5 py-1 rounded border font-mono ${editCell.status === k ? "border-teal-500 text-teal-700 bg-teal-50" : "border-slate-300 text-slate-500 hover:border-slate-400"}`}
-                >
-                  {v.label}
-                </button>
-              ))}
-            </div>
+            {(() => {
+              const blocks = editCell.blocks || [];
+              const hasWorking = blocks.some((b) => b.type === "Working");
+              const hasNonWorking = blocks.some((b) => b.type !== "Working");
+              const isAllDay = (b) => !b.start && !b.end;
 
-            {!editCell.status && (
-              <>
-                <label className="block text-xs text-slate-500 mb-1.5">Shift time</label>
-                <div className="flex gap-2 mb-4">
-                  <input type="time" value={editCell.shiftStart} onChange={(e) => updateCell(editing.empId, editing.date, { shiftStart: e.target.value })}
-                    className="flex-1 bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900" />
-                  <input type="time" value={editCell.shiftEnd} onChange={(e) => updateCell(editing.empId, editing.date, { shiftEnd: e.target.value })}
-                    className="flex-1 bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900" />
-                </div>
+              const addBlock = () => {
+                const empStart = editEmp?.shiftStart || "09:00";
+                const empEnd = editEmp?.shiftEnd || "17:00";
+                const last = blocks[blocks.length - 1];
+                updateBlocks(editing.empId, editing.date, [
+                  ...blocks,
+                  { id: `blk${Date.now()}`, type: "Working", start: last?.end || empStart, end: empEnd },
+                ]);
+              };
+              const patchBlock = (id, patch) => updateBlocks(editing.empId, editing.date, blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+              const removeBlock = (id) => updateBlocks(editing.empId, editing.date, blocks.filter((b) => b.id !== id));
 
-                <label className="block text-xs text-slate-500 mb-1.5">Skills — each can be all day or specific hours</label>
-                <div className="mb-4">
-                  <TaskBuilder
-                    tasks={editCell.tasks}
-                    onAddBatch={(newTasks) => addTasks(editing.empId, editing.date, newTasks)}
-                    onRemove={(taskId) => removeTask(editing.empId, editing.date, taskId)}
-                    functionOptions={functionOptions}
-                  />
-                </div>
-              </>
-            )}
+              return (
+                <>
+                  <label className="block text-xs text-slate-500 mb-2">Blocks for today</label>
+                  <div className="space-y-2 mb-2">
+                    {blocks.map((b) => (
+                      <div key={b.id} className="border border-slate-200 rounded-lg p-2.5">
+                        <div className="flex items-center gap-2 mb-2">
+                          <select
+                            value={b.type}
+                            onChange={(e) => patchBlock(b.id, { type: e.target.value })}
+                            className="text-xs font-mono border border-slate-300 rounded px-1.5 py-1.5 bg-white text-slate-900"
+                          >
+                            {BLOCK_TYPES.map((t) => <option key={t} value={t}>{blockLabel(t)}</option>)}
+                          </select>
+                          <label className="flex items-center gap-1 text-[10px] text-slate-500 shrink-0 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={isAllDay(b)}
+                              onChange={(e) => patchBlock(b.id, e.target.checked
+                                ? { start: "", end: "" }
+                                : { start: b.type === "Working" ? (editEmp?.shiftStart || "09:00") : "09:00", end: b.type === "Working" ? (editEmp?.shiftEnd || "17:00") : "17:00" })}
+                              className="accent-teal-600"
+                            />
+                            All day
+                          </label>
+                          {blocks.length > 1 && (
+                            <button onClick={() => removeBlock(b.id)} className="text-slate-400 hover:text-rose-600 ml-auto shrink-0" title="Remove this block">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                        {!isAllDay(b) && (
+                          <div className="flex items-center gap-2">
+                            <input type="time" value={b.start} onChange={(e) => patchBlock(b.id, { start: e.target.value })}
+                              className="flex-1 bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900" />
+                            <span className="text-slate-400 text-xs">–</span>
+                            <input type="time" value={b.end} onChange={(e) => patchBlock(b.id, { end: e.target.value })}
+                              className="flex-1 bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900" />
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    onClick={addBlock}
+                    className="w-full text-xs px-3 py-2 rounded-full border border-dashed border-slate-300 text-slate-500 hover:border-teal-500 hover:text-teal-700 flex items-center justify-center gap-1.5 mb-4"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add another block
+                  </button>
 
-            {editCell.status && editCell.status !== "NotScheduled" && (
-              <>
-                <label className="block text-xs text-slate-500 mb-1.5">When</label>
-                <div className="mb-4">
-                  <ScopeToggle
-                    scope={editCell.statusScope}
-                    start={editCell.statusStart}
-                    end={editCell.statusEnd}
-                    onChange={({ scope, start, end }) => {
-                      const patch = { statusScope: scope, statusStart: start, statusEnd: end };
-                      if (scope === "partial" && start && end) patch.hours = hoursBetween(start, end);
-                      updateCell(editing.empId, editing.date, patch);
-                    }}
-                  />
-                </div>
+                  {hasNonWorking && (
+                    <>
+                      <label className="block text-xs text-slate-500 mb-1.5">Shift covered by</label>
+                      <select
+                        value={editCell.coveredBy}
+                        onChange={(e) => updateCell(editing.empId, editing.date, { coveredBy: e.target.value })}
+                        className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900 mb-4"
+                      >
+                        <option value="">No coverage assigned</option>
+                        {employees.filter((e) => e.id !== editing.empId).map((e) => (
+                          <option key={e.id} value={e.name}>{e.name}</option>
+                        ))}
+                      </select>
+                    </>
+                  )}
 
-                {editCell.statusScope !== "partial" && (
-                  <>
-                    <label className="block text-xs text-slate-500 mb-1.5">Hours</label>
-                    <div className="mb-4">
-                      <HourPicker value={editCell.hours} onChange={(v) => updateCell(editing.empId, editing.date, { hours: v })} />
-                    </div>
-                  </>
-                )}
-
-                <label className="block text-xs text-slate-500 mb-1.5">Shift covered by</label>
-                <select
-                  value={editCell.coveredBy}
-                  onChange={(e) => updateCell(editing.empId, editing.date, { coveredBy: e.target.value })}
-                  className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900 mb-4"
-                >
-                  <option value="">No coverage assigned</option>
-                  {employees.filter((e) => e.id !== editing.empId).map((e) => (
-                    <option key={e.id} value={e.name}>{e.name}</option>
-                  ))}
-                </select>
-              </>
-            )}
+                  {hasWorking && (
+                    <>
+                      <label className="block text-xs text-slate-500 mb-1.5">Skills — each can be all day or specific hours</label>
+                      <div className="mb-4">
+                        <TaskBuilder
+                          tasks={editCell.tasks}
+                          onAddBatch={(newTasks) => addTasks(editing.empId, editing.date, newTasks)}
+                          onRemove={(taskId) => removeTask(editing.empId, editing.date, taskId)}
+                          functionOptions={functionOptions}
+                        />
+                      </div>
+                    </>
+                  )}
+                </>
+              );
+            })()}
 
             <div className="border-t border-slate-200 pt-3 mb-4">
               <div className="flex items-center justify-between mb-1.5">
