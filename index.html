@@ -1158,6 +1158,19 @@ function heatColor(pct, invert) {
   return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
 }
 
+// IB coverage's real target is much lower than "more is always better" — 33%+ on-duty staff
+// on IB is the actual goal, not a problem. Green at/above that, red only once it's genuinely
+// thin (under 20%), amber in the gap between. Replaces the generic 0-100% gradient, which was
+// coloring a perfectly healthy 33-40% as orange.
+function ibCoverageColor(pct) {
+  if (pct >= 33) return "#15803d"; // green — at or above target
+  if (pct < 20) return "#b91c1c"; // red — genuinely thin
+  const t = (33 - pct) / (33 - 20); // 0 (near green) → 1 (near red)
+  const GREEN = [21, 128, 61], RED = [185, 28, 28];
+  const rgb = GREEN.map((g, i) => Math.round(g + (RED[i] - g) * t));
+  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+}
+
 function TimelineBar({ label, start, end, color }) {
   const s = toMinutes(start);
   const e = toMinutes(end);
@@ -1763,7 +1776,7 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
                         ? "#f1f5f9"
                         : singleCoverage
                           ? (covered ? TH.teal : "#e0685a")
-                          : heatColor(stats.pct, true);
+                          : ibCoverageColor(stats.pct);
                       const detail = stats.working === 0
                         ? `${fmtDate(d)} ${fmtHourMark(hr)} — nobody on shift`
                         : singleCoverage
@@ -1788,9 +1801,9 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
         </div>
         <div className="flex items-center justify-between mt-2 flex-wrap gap-2">
           <div className="flex items-center gap-3 text-[10px] text-slate-400">
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: heatColor(95, true) }} /> High</span>
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: heatColor(70, true) }} /> Mid</span>
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: heatColor(40, true) }} /> Low</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(40) }} /> 33%+ (target)</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(26) }} /> 20-33%</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(10) }} /> Under 20%</span>
             <span className="flex items-center gap-1 ml-2"><span className="text-slate-300">·1</span> = just needs 1 person (8-9am, 5-8pm)</span>
           </div>
           <span className="text-[11px] font-mono text-slate-500 h-4">{hoveredCell || "hover a cell for detail"}</span>
@@ -3315,6 +3328,7 @@ export default function ManagerSchedule() {
   const [logTimeOff, setLogTimeOff] = useState(null); // empId
   const [logPickerEmp, setLogPickerEmp] = useState("");
   const [logDate, setLogDate] = useState("");
+  const [calAddFor, setCalAddFor] = useState(null); // date string — which day's quick-add picker is open in Calendar view
   const [logType, setLogType] = useState("PTO");
   const [logScope, setLogScope] = useState("allday");
   const [logStart, setLogStart] = useState("09:00");
@@ -3324,8 +3338,6 @@ export default function ManagerSchedule() {
   const [newTdEmp, setNewTdEmp] = useState("");
   const [newTdDate, setNewTdDate] = useState("");
   const [newTdLabel, setNewTdLabel] = useState("Approved");
-  const [timeOffView, setTimeOffView] = useState("grid"); // 'dates' | 'grid'
-  const [showPastList, setShowPastList] = useState(false);
   const [showPastGrid, setShowPastGrid] = useState(false);
   const [holidayView, setHolidayView] = useState("table"); // 'table' | 'cards'
   const [undoStack, setUndoStack] = useState([]); // snapshots of `data` from right before each change, most recent last
@@ -3919,36 +3931,6 @@ export default function ManagerSchedule() {
     persist({ ...data, timeOffDates: (data.timeOffDates || []).filter((e) => e.id !== entryId), cells: nextCells, updatedAt: Date.now() });
   };
 
-  const setTimeOffCell = (empId, date, label) => {
-    const list = data.timeOffDates || [];
-    const existing = list.find((e) => e.empId === empId && e.date === date);
-    let next;
-    if (!label) {
-      next = list.filter((e) => !(e.empId === empId && e.date === date));
-    } else if (existing) {
-      next = list.map((e) => (e.empId === empId && e.date === date) ? { ...e, label } : e);
-    } else {
-      next = [...list, { id: `td${Date.now()}`, empId, date, label }];
-    }
-
-    const nextCells = { ...cells };
-    const key = cellKey(empId, date);
-    const mappedStatus = label ? TIMEOFF_LABEL_TO_STATUS[label] : null;
-    if (mappedStatus) {
-      const current = nextCells[key] || emptyCell();
-      nextCells[key] = { ...current, status: mappedStatus, statusScope: "allday", statusStart: "", statusEnd: "" };
-    } else if (!label) {
-      // Cleared back to "—" in the Time Off tab — clear the Schedule status too, but only if
-      // it's still one of the values a Time Off label would have set.
-      const current = nextCells[key];
-      if (current && TIMEOFF_SYNCED_STATUS_VALUES.includes(current.status)) {
-        nextCells[key] = { ...current, status: "" };
-      }
-    }
-
-    persist({ ...data, timeOffDates: next, cells: nextCells, updatedAt: Date.now() });
-  };
-
   const submitLogTimeOff = () => {
     if (!logTimeOff || !logDate) return;
     let next = addDateTo(data, logDate);
@@ -4134,164 +4116,93 @@ export default function ManagerSchedule() {
                 Log time off
               </button>
             </div>
-            <div className="flex items-center gap-1 rounded-full border p-0.5" style={{ borderColor: TH.border }}>
-              {[{ id: "dates", label: "By Date" }, { id: "grid", label: "Grid" }].map((v) => (
-                <button
-                  key={v.id}
-                  onClick={() => setTimeOffView(v.id)}
-                  className="text-xs px-3 py-1 rounded-full font-semibold transition-colors"
-                  style={timeOffView === v.id ? { backgroundColor: TH.navy, color: "#fff" } : { color: TH.textMid }}
-                >
-                  {v.label}
-                </button>
-              ))}
-            </div>
           </div>
 
-          {timeOffView === "grid" ? (
-            <div className="mb-8">
-              {(() => {
+          <div className="mb-8">
+            {(() => {
                 const allGridDates = Array.from(new Set([...dates, ...datesThroughEOY(), ...(data.timeOffDates || []).map((e) => e.date)])).sort();
                 const pastGridDates = allGridDates.filter((d) => d < todayISO);
                 const upcomingGridDates = allGridDates.filter((d) => d >= todayISO);
                 const visibleGridDates = showPastGrid ? allGridDates : upcomingGridDates;
+                const startQuickAdd = (d, empId) => {
+                  setLogTimeOff(empId); setLogDate(d); setLogType("PTO"); setLogScope("allday");
+                  setLogStart("09:00"); setLogEnd("17:00"); setLogHours("8"); setLogCoveredBy("");
+                  setCalAddFor(null);
+                };
                 return (
                   <>
                     {pastGridDates.length > 0 && (
                       <button
                         onClick={() => setShowPastGrid((v) => !v)}
-                        className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 mb-2 font-medium"
+                        className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 mb-3 font-medium"
                       >
                         {showPastGrid ? "▾" : "▸"} {showPastGrid ? "Hide" : "Show"} {pastGridDates.length} past date{pastGridDates.length === 1 ? "" : "s"}
                       </button>
                     )}
-                    <div className="overflow-auto border border-slate-200 rounded-lg" style={{ maxHeight: "70vh" }}>
-                      <table className="border-collapse text-sm min-w-full">
-                        <thead>
-                          <tr>
-                            <th className="sticky left-0 top-0 z-20 bg-white border-b border-r border-slate-200 px-3 py-2 text-left text-xs text-slate-500 font-mono min-w-[140px]">Care Advocate</th>
-                            {visibleGridDates.map((d) => {
-                              const peopleOut = tdPeopleByDate[d] ? tdPeopleByDate[d].size : 0;
-                              const dOverlap = peopleOut >= 2;
-                              const isPast = d < todayISO;
-                              return (
-                                <th
-                                  key={d}
-                                  className={`sticky top-0 z-10 border-b px-2 py-2 text-center text-xs font-mono min-w-[110px] ${dOverlap ? "bg-amber-50 border-amber-200 text-amber-800" : isPast ? "bg-slate-50 border-slate-200 text-slate-400" : "bg-white border-slate-200 text-slate-700"}`}
-                                  title={dOverlap ? `${peopleOut} people out this day` : undefined}
-                                >
-                                  {fmtDate(d)}
-                                  {dOverlap && (
-                                    <span className="flex items-center justify-center gap-0.5 mt-0.5 text-[9px] font-semibold">
-                                      <AlertTriangle className="w-2.5 h-2.5" /> {peopleOut}
-                                    </span>
-                                  )}
-                                </th>
-                              );
-                            })}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {employees.map((emp, i) => (
-                            <tr key={emp.id} className={i % 2 ? "bg-slate-50" : "bg-white"}>
-                              <td className="sticky left-0 z-10 px-3 py-2 text-sm text-slate-900 border-r border-slate-200" style={{ backgroundColor: i % 2 ? "#f8fafc" : "#fff" }}>{emp.name}</td>
-                              {visibleGridDates.map((d) => {
-                                const entry = (data.timeOffDates || []).find((e) => e.empId === emp.id && e.date === d);
-                                const dOverlap = tdPeopleByDate[d] && tdPeopleByDate[d].size >= 2;
-                                const flagged = entry && dOverlap;
-                                const isPast = d < todayISO;
+                    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+                      {visibleGridDates.map((d) => {
+                        const entries = (data.timeOffDates || []).filter((e) => e.date === d);
+                        const peopleOut = tdPeopleByDate[d] ? tdPeopleByDate[d].size : 0;
+                        const overlap = peopleOut >= 2;
+                        const isPast = d < todayISO;
+                        return (
+                          <div
+                            key={d}
+                            className={`relative border rounded-lg p-2 min-h-[92px] ${overlap ? "border-amber-200 bg-amber-50/50" : isPast ? "border-slate-100 bg-slate-50/50" : "border-slate-200 bg-white"}`}
+                          >
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className={`text-[11px] font-mono font-semibold ${isPast ? "text-slate-400" : "text-slate-700"}`}>{fmtDate(d)}</span>
+                              <button
+                                onClick={() => setCalAddFor((cur) => (cur === d ? null : d))}
+                                className="text-slate-400 hover:text-teal-700 leading-none text-sm font-bold px-1"
+                                title="Log time off for this day"
+                              >
+                                +
+                              </button>
+                            </div>
+                            {overlap && (
+                              <div className="flex items-center gap-1 text-[9px] text-amber-800 font-semibold mb-1">
+                                <AlertTriangle className="w-2.5 h-2.5" /> {peopleOut} out
+                              </div>
+                            )}
+                            <div className="space-y-1">
+                              {entries.map((entry) => {
+                                const emp = employees.find((e) => e.id === entry.empId);
                                 return (
-                                  <td key={d} className={`px-1.5 py-1.5 border-b text-center ${dOverlap ? "border-amber-100 bg-amber-50/40" : isPast ? "border-slate-100 bg-slate-50/50" : "border-slate-100"}`}>
-                                    <select
-                                      value={entry ? entry.label : ""}
-                                      onChange={(ev) => setTimeOffCell(emp.id, d, ev.target.value)}
-                                      title={flagged ? `${tdPeopleByDate[d].size} people out this day` : "Approved/Sick/LoA/Floating Holiday also set the Schedule status; Flex doesn't"}
-                                      className={`w-full text-[10px] rounded border px-1 py-1 ${flagged ? "bg-amber-100 text-amber-900 border-amber-300 font-semibold" : entry ? "bg-indigo-50 text-indigo-800 border-indigo-200" : "bg-white border-slate-200 text-slate-400"}`}
-                                    >
-                                      <option value="">—</option>
-                                      {["Approved", "Sick", "Flex", "LoA", "Floating Holiday"].map((l) => <option key={l} value={l}>{l}</option>)}
-                                    </select>
-                                  </td>
+                                  <div
+                                    key={entry.id}
+                                    title={`${emp ? emp.name : entry.empId} — ${entry.label} — ${fmtDate(d)}`}
+                                    className="flex items-center justify-between gap-1 text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800"
+                                  >
+                                    <span className="truncate">{emp ? emp.name.split(" ")[0] : entry.empId}</span>
+                                    <button onClick={() => removeTimeOffDate(entry.id)} className="text-indigo-400 hover:text-rose-500 shrink-0"><X className="w-2.5 h-2.5" /></button>
+                                  </div>
                                 );
                               })}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                            </div>
+
+                            {calAddFor === d && (
+                              <div className="absolute left-0 right-0 top-full mt-1 z-20 bg-white border border-slate-300 rounded-lg shadow-lg p-1.5 max-h-40 overflow-y-auto">
+                                {employees.map((e) => (
+                                  <button
+                                    key={e.id}
+                                    onClick={() => startQuickAdd(d, e.id)}
+                                    className="block w-full text-left text-[11px] px-2 py-1 rounded hover:bg-teal-50 hover:text-teal-800 text-slate-700 whitespace-nowrap"
+                                  >
+                                    {e.name}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </>
                 );
               })()}
-            </div>
-          ) : (
-          <>
-          {(() => {
-            const byDate = {};
-            (data.timeOffDates || []).forEach((entry) => {
-              (byDate[entry.date] = byDate[entry.date] || []).push(entry);
-            });
-            const renderGroup = (sortedDates, isLast) => sortedDates.map((date, i) => {
-              const entries = byDate[date];
-              const distinctPeople = new Set(entries.map((e) => e.empId)).size;
-              const overlap = distinctPeople >= 2;
-              const lastRow = i === sortedDates.length - 1;
-              return (
-                <div key={date} className="relative flex gap-3 px-3 py-2.5">
-                  <div className="flex flex-col items-center w-3 pt-0.5 flex-shrink-0">
-                    <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${overlap ? "bg-amber-500" : "bg-slate-300"}`} />
-                    {!lastRow && <span className="w-px flex-1 bg-slate-200 mt-1" />}
-                  </div>
-                  <div className="flex-1 pb-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs font-mono text-slate-700 font-semibold">{fmtDate(date)}</span>
-                      {overlap && (
-                        <span className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
-                          <AlertTriangle className="w-3 h-3" /> {distinctPeople} out
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {entries.map((entry) => {
-                        const emp = employees.find((e) => e.id === entry.empId);
-                        return (
-                          <span key={entry.id} className="flex items-center gap-1.5 text-xs px-2 py-1 rounded-full border bg-white border-slate-200 shadow-sm">
-                            <span className="font-medium text-slate-900">{emp ? emp.name : entry.empId}</span>
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-800">{entry.label}</span>
-                            <button onClick={() => removeTimeOffDate(entry.id)} className="text-slate-400 hover:text-rose-500"><X className="w-3 h-3" /></button>
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              );
-            });
-            const upcoming = Object.keys(byDate).filter((d) => d >= todayISO).sort();
-            const past = Object.keys(byDate).filter((d) => d < todayISO).sort().reverse();
-            return (
-              <>
-                <h3 className="text-xs font-mono text-slate-500 mb-1.5 uppercase tracking-wide">Upcoming</h3>
-                <div className="border border-slate-200 rounded-lg bg-slate-50/60 py-1 mb-4">
-                  {upcoming.length === 0
-                    ? <div className="px-3 py-4 text-xs text-slate-400 italic">No upcoming dated entries.</div>
-                    : renderGroup(upcoming)}
-                </div>
-                <button
-                  onClick={() => setShowPastList((v) => !v)}
-                  className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 mb-1.5 font-medium"
-                >
-                  {showPastList ? "▾" : "▸"} Past — {past.length} entr{past.length === 1 ? "y" : "ies"} kept for history
-                </button>
-                {showPastList && (
-                  <div className="border border-slate-200 rounded-lg bg-slate-50/60 py-1 mb-3 opacity-90">
-                    {past.length === 0
-                      ? <div className="px-3 py-4 text-xs text-slate-400 italic">No past dated entries yet.</div>
-                      : renderGroup(past)}
-                  </div>
-                )}
-              </>
-            );
-          })()}
+          </div>
+
           <div className="flex flex-wrap gap-2 mb-8">
             <select value={newTdEmp} onChange={(e) => setNewTdEmp(e.target.value)} className="bg-white border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-900">
               <option value="">Person…</option>
@@ -4312,8 +4223,6 @@ export default function ManagerSchedule() {
               Add
             </button>
           </div>
-          </>
-          )}
         </div>
       )}
 
