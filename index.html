@@ -11,7 +11,8 @@
   "imports": {
     "react": "https://esm.sh/react@18.2.0",
     "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
-    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react"
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react",
+    "recharts": "https://esm.sh/recharts@2.12.7?external=react,react-dom"
   }
 }
 </script>
@@ -23,7 +24,8 @@
 </div>
 <script type="text/babel" data-type="module" data-presets="react">
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Plus, Trash2, X, RefreshCw, Users, CalendarPlus, Save, AlertCircle, AlertTriangle, CalendarDays, Gift, Clock3, UserCheck, Mail, Copy, Check, Pencil, Gauge, Microscope, Lock, FileSpreadsheet, Download, Undo2, Palmtree, Thermometer } from "lucide-react";
+import { Plus, Trash2, X, RefreshCw, Users, CalendarPlus, Save, AlertCircle, AlertTriangle, CalendarDays, Gift, Clock3, UserCheck, Mail, Copy, Check, Pencil, Gauge, Microscope, Lock, FileSpreadsheet, Download, Undo2, Palmtree, Thermometer, TrendingDown } from "lucide-react";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
 
 const STORAGE_KEY = "cx-schedule-v1";
 // Better than a plaintext constant, but still a client-side check — someone determined enough
@@ -1361,6 +1363,7 @@ function RosterTab({ employees, teamColor, updateEmployee, removeEmployee, setAd
   const [sortDir, setSortDir] = useState("asc");
   const [filterText, setFilterText] = useState("");
   const [filterTeam, setFilterTeam] = useState("");
+  const [filterManager, setFilterManager] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [dialog, setDialog] = useState(null); // { type: 'confirm'|'info', message, onConfirm? }
 
@@ -1411,6 +1414,7 @@ function RosterTab({ employees, teamColor, updateEmployee, removeEmployee, setAd
   const filtered = employees.filter((e) => {
     if (filterText && !e.name.toLowerCase().includes(filterText.toLowerCase())) return false;
     if (filterTeam && e.team !== filterTeam) return false;
+    if (filterManager && e.manager !== filterManager) return false;
     if (filterStatus && (e.status || "Active") !== filterStatus) return false;
     return true;
   });
@@ -1477,13 +1481,19 @@ function RosterTab({ employees, teamColor, updateEmployee, removeEmployee, setAd
           <option value="Engagement">Engagement</option>
           <option value="Resolution">Resolution</option>
         </select>
+        <select value={filterManager} onChange={(e) => setFilterManager(e.target.value)} className="text-xs bg-white border border-slate-300 rounded px-2 py-1.5 text-slate-600">
+          <option value="">All managers</option>
+          {[...new Set(employees.map((e) => e.manager).filter(Boolean))].sort().map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
         <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="text-xs bg-white border border-slate-300 rounded px-2 py-1.5 text-slate-600">
           <option value="">All statuses</option>
           <option value="Active">Active</option>
           <option value="Attrition">Attrition</option>
         </select>
-        {(filterText || filterTeam || filterStatus) && (
-          <button onClick={() => { setFilterText(""); setFilterTeam(""); setFilterStatus(""); }} className="text-[11px] text-slate-500 hover:text-slate-700 underline">
+        {(filterText || filterTeam || filterManager || filterStatus) && (
+          <button onClick={() => { setFilterText(""); setFilterTeam(""); setFilterManager(""); setFilterStatus(""); }} className="text-[11px] text-slate-500 hover:text-slate-700 underline">
             Clear filters
           </button>
         )}
@@ -1646,7 +1656,6 @@ function RosterTab({ employees, teamColor, updateEmployee, removeEmployee, setAd
 }
 
 function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }) {
-  const TEAMS = ["Engagement", "Resolution"];
   // Weekends are on the schedule grid but don't factor into staffing coverage
   const weekdayDates = dates.filter((d) => {
     const dow = new Date(d + "T00:00:00").getDay();
@@ -1715,116 +1724,155 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
     return { working, onIb, pct: working > 0 ? Math.round((onIb / working) * 100) : 0 };
   };
 
-  const StatRow = ({ label, team, highlight }) => (
-    <tr>
-      <td className={`sticky left-0 z-10 bg-slate-50 border-r border-slate-200 px-3 py-2 text-xs font-mono whitespace-nowrap ${highlight ? "text-teal-700 font-semibold" : "text-slate-700"}`}>
-        {label}
-      </td>
-      {weekdayDates.map((d) => {
-        const stats = coverageStats(d, team);
-        return (
-          <td key={d} className="px-2 py-2 text-center border-b border-slate-200/60" style={{ backgroundColor: heatColor(stats.oooPct, false) }}>
-            <div className="text-xs font-semibold text-white">{stats.coveragePct}% working</div>
-            <div className="text-[10px] text-white/85">{stats.oooPct}% OOO</div>
-          </td>
-        );
-      })}
-    </tr>
-  );
+  // ── Redesigned overview below: KPI cards + trend chart + flagged skill gaps + a cleaner
+  // hoverable heatmap, all built from the exact same coverageStats/ibCoverageStats/pieData/
+  // ibHourlyStats computations above — just presented as something scannable at a glance
+  // instead of three separate wide tables.
+  const todayDate = weekdayDates.find((d) => isToday(d)) || weekdayDates[weekdayDates.length - 1];
+  const todayStats = todayDate ? coverageStats(todayDate, null) : null;
+  const todayIb = todayDate ? ibCoverageStats(todayDate) : null;
 
-  const IbRow = () => (
-    <tr>
-      <td className="sticky left-0 z-10 bg-slate-50 border-r border-slate-200 px-3 py-2 text-xs font-mono whitespace-nowrap text-teal-700 font-semibold">
-        IB Coverage
-      </td>
-      {weekdayDates.map((d) => {
-        const stats = ibCoverageStats(d);
-        return (
-          <td key={d} className="px-2 py-2 text-center border-b border-slate-200/60" style={{ backgroundColor: heatColor(stats.ibPct, true) }}>
-            <div className="text-xs font-semibold text-white">{stats.ibPct}%</div>
-            <div className="text-[10px] text-white/85">{stats.onIb}/{stats.total} on IB</div>
-          </td>
-        );
-      })}
-    </tr>
+  const trendData = weekdayDates.map((d) => {
+    const s = coverageStats(d, null);
+    const ib = ibCoverageStats(d);
+    return { date: fmtDate(d), working: s.coveragePct, ooo: s.oooPct, ib: ib.ibPct };
+  });
+
+  let lowest = null;
+  weekdayDates.forEach((d) => {
+    HEATMAP_HOURS.forEach((hr) => {
+      const stats = ibHourlyStats(d, hr);
+      if (stats.working > 0 && (!lowest || stats.pct < lowest.pct)) {
+        lowest = { pct: stats.pct, date: d, hour: hr };
+      }
+    });
+  });
+
+  const SKILL_FLOOR = 45; // below this, a skill is flagged as under-covered — adjust to taste
+  const [hoveredCell, setHoveredCell] = useState(null);
+
+  const KpiCard = ({ icon: Icon, label, value, sub, accent }) => (
+    <div className="border rounded-lg bg-white p-3.5 flex-1 min-w-[150px]" style={{ borderColor: TH.border }}>
+      <div className="flex items-center gap-1.5 mb-1.5" style={{ color: accent }}>
+        <Icon className="w-3.5 h-3.5" />
+        <span className="text-[10px] font-mono uppercase tracking-wide">{label}</span>
+      </div>
+      <div className="text-2xl font-bold" style={{ color: TH.navy }}>{value}</div>
+      {sub && <div className="text-[11px] text-slate-400 mt-0.5">{sub}</div>}
+    </div>
   );
 
   return (
     <div className="p-4 sm:p-6">
-      <div className="overflow-auto border border-slate-200 rounded-lg mb-8">
-        <table className="border-collapse text-sm min-w-full">
-          <thead>
-            <tr>
-              <th className="sticky left-0 z-20 bg-white border-b border-r border-slate-200 px-3 py-2 text-left text-xs text-slate-500 font-mono">Team</th>
-              {weekdayDates.map((d) => (
-                <th key={d} className="bg-white border-b border-slate-200 px-2 py-2 text-center text-xs font-mono text-slate-700 min-w-[100px]">
-                  {fmtDate(d)}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <StatRow label="All CX" highlight />
-            {TEAMS.map((t) => <StatRow key={t} label={t} team={t} />)}
-            <IbRow />
-          </tbody>
-        </table>
+      {/* KPI summary row */}
+      <div className="flex flex-wrap gap-3 mb-6">
+        <KpiCard icon={Users} label="Working today" value={todayStats ? `${todayStats.coveragePct}%` : "—"} sub={todayDate ? fmtDate(todayDate) : ""} accent={TH.teal} />
+        <KpiCard icon={AlertTriangle} label="OOO today" value={todayStats ? `${todayStats.oooPct}%` : "—"} sub={todayStats ? `${todayStats.ooo} of ${todayStats.total} out` : ""} accent={TH.coral} />
+        <KpiCard icon={Clock3} label="IB coverage today" value={todayIb ? `${todayIb.ibPct}%` : "—"} sub={todayIb ? `${todayIb.onIb}/${todayIb.total} on IB` : ""} accent={TH.blue} />
+        <KpiCard icon={TrendingDown} label="Lowest IB point" value={lowest ? `${fmtDate(lowest.date)} ${fmtHourMark(lowest.hour)}` : "—"} sub={lowest ? `${lowest.pct}% coverage` : "No data yet"} accent="#c0392b" />
       </div>
 
+      {/* Coverage trend chart */}
+      <div className="border rounded-lg bg-white p-4 mb-6" style={{ borderColor: TH.border }}>
+        <h2 className="text-xs font-mono uppercase tracking-wide mb-3" style={{ color: TH.tealDark }}>Coverage this window</h2>
+        {trendData.length === 0 ? (
+          <div className="text-xs text-slate-400 italic py-6 text-center">No dates in view yet.</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={220}>
+            <AreaChart data={trendData} margin={{ left: -20, right: 10 }}>
+              <defs>
+                <linearGradient id="workingFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={TH.teal} stopOpacity={0.35} />
+                  <stop offset="100%" stopColor={TH.teal} stopOpacity={0.02} />
+                </linearGradient>
+                <linearGradient id="ibFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={TH.blue} stopOpacity={0.3} />
+                  <stop offset="100%" stopColor={TH.blue} stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" vertical={false} />
+              <XAxis dataKey="date" tick={{ fontSize: 11, fill: TH.textMuted }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: TH.textMuted }} axisLine={false} tickLine={false} width={36} />
+              <ReferenceLine y={70} stroke="#e0685a" strokeDasharray="4 3" label={{ value: "target", position: "insideTopRight", fontSize: 10, fill: "#e0685a" }} />
+              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${TH.border}` }} />
+              <Area type="monotone" dataKey="working" name="Working %" stroke={TH.teal} fill="url(#workingFill)" strokeWidth={2} />
+              <Area type="monotone" dataKey="ib" name="IB coverage %" stroke={TH.blue} fill="url(#ibFill)" strokeWidth={2} />
+            </AreaChart>
+          </ResponsiveContainer>
+        )}
+        <div className="flex items-center gap-4 mt-1 text-[11px]" style={{ color: TH.textMuted }}>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: TH.teal }} /> Working</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: TH.blue }} /> IB coverage</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-400" /> Dashed line = 70% target</span>
+        </div>
+      </div>
+
+      {/* Skill coverage, sorted, with under-covered skills flagged */}
       <h2 className="text-xs font-mono text-teal-700 mb-2 uppercase tracking-wide">Skill Coverage Breakdown</h2>
       {pieData.length === 0 ? (
-        <div className="text-xs text-slate-400 italic border border-slate-200 rounded-lg p-4">No skills assigned in this window yet.</div>
+        <div className="text-xs text-slate-400 italic border border-slate-200 rounded-lg p-4 mb-6">No skills assigned in this window yet.</div>
       ) : (
-        <div className="border border-slate-200 rounded-lg p-5 bg-white space-y-2.5">
-          {pieData.map((entry) => (
-            <div key={entry.name} className="flex items-center gap-3">
-              <span className="w-40 shrink-0 text-xs text-slate-700 truncate">{entry.name}</span>
-              <div className="flex-1 h-2.5 rounded-full bg-slate-100 overflow-hidden">
-                <div
-                  className="h-full rounded-full"
-                  style={{ width: `${Math.min(100, entry.pct)}%`, backgroundColor: taskColorHex(entry.name) }}
-                />
+        <div className="border border-slate-200 rounded-lg p-5 bg-white space-y-2.5 mb-6">
+          {pieData.map((entry) => {
+            const low = entry.pct < SKILL_FLOOR;
+            return (
+              <div key={entry.name} className="flex items-center gap-3">
+                <span className="w-40 shrink-0 text-xs text-slate-700 truncate">{entry.name}</span>
+                <div className="flex-1 h-2.5 rounded-full bg-slate-100 overflow-hidden relative">
+                  <div className="h-full rounded-full" style={{ width: `${Math.min(100, entry.pct)}%`, backgroundColor: low ? "#e0685a" : taskColorHex(entry.name) }} />
+                  <div className="absolute top-0 bottom-0 border-l border-dashed border-slate-300" style={{ left: `${SKILL_FLOOR}%` }} />
+                </div>
+                <span className="w-10 shrink-0 text-xs font-mono text-right" style={{ color: low ? "#c0392b" : TH.textMid }}>{entry.pct}%</span>
+                {low && <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" title={`Under the ${SKILL_FLOOR}% floor`} />}
               </div>
-              <span className="w-10 shrink-0 text-xs font-mono text-slate-500 text-right">{entry.pct}%</span>
-            </div>
-          ))}
+            );
+          })}
+          <p className="text-[10px] text-slate-400 pt-1">Dashed line = {SKILL_FLOOR}% floor. Anything under it is flagged as under-covered.</p>
         </div>
       )}
 
-      <h2 className="text-xs font-mono text-teal-700 mb-2 mt-8 uppercase tracking-wide">Hourly IB Coverage Heatmap</h2>
-      <div className="overflow-auto border border-slate-200 rounded-lg mb-8">
-        <table className="border-collapse text-sm min-w-full">
-          <thead>
-            <tr>
-              <th className="sticky left-0 z-20 bg-white border-b border-r border-slate-200 px-3 py-2 text-left text-xs text-slate-500 font-mono">Hour</th>
-              {weekdayDates.map((d) => (
-                <th key={d} className="bg-white border-b border-slate-200 px-2 py-2 text-center text-xs font-mono text-slate-700 min-w-[90px]">{fmtDate(d)}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {HEATMAP_HOURS.map((hr) => (
-              <tr key={hr}>
-                <td className="sticky left-0 z-10 bg-slate-50 border-r border-slate-200 px-3 py-1.5 text-xs font-mono text-slate-700 whitespace-nowrap">{fmtHourMark(hr)}</td>
-                {weekdayDates.map((d) => {
-                  const stats = ibHourlyStats(d, hr);
-                  return (
-                    <td key={d} className="px-2 py-1.5 text-center border-b border-slate-200/60" style={{ backgroundColor: stats.working > 0 ? heatColor(stats.pct, true) : "#f1f5f9" }}>
-                      {stats.working > 0 ? (
-                        <>
-                          <div className="text-[11px] font-semibold text-white">{stats.pct}%</div>
-                          <div className="text-[9px] text-white/80">{stats.onIb}/{stats.working}</div>
-                        </>
-                      ) : (
-                        <div className="text-[10px] text-slate-400">—</div>
-                      )}
-                    </td>
-                  );
-                })}
+      {/* Cleaner hourly IB heatmap — smooth color scale, hover for exact numbers instead of
+          cramming both % and counts into every cell */}
+      <h2 className="text-xs font-mono text-teal-700 mb-2 uppercase tracking-wide">Hourly IB Coverage</h2>
+      <div className="border border-slate-200 rounded-lg bg-white p-4 mb-4">
+        <div className="overflow-x-auto">
+          <table className="border-collapse w-full">
+            <thead>
+              <tr>
+                <th className="text-left text-[10px] font-mono text-slate-400 pb-1 pr-2">Hour</th>
+                {weekdayDates.map((d) => <th key={d} className="text-[10px] font-mono text-slate-500 pb-1 text-center min-w-[60px]">{fmtDate(d)}</th>)}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {HEATMAP_HOURS.map((hr) => (
+                <tr key={hr}>
+                  <td className="text-[10px] font-mono text-slate-500 pr-2 whitespace-nowrap">{fmtHourMark(hr)}</td>
+                  {weekdayDates.map((d) => {
+                    const stats = ibHourlyStats(d, hr);
+                    return (
+                      <td key={d} className="p-0.5">
+                        <div
+                          onMouseEnter={() => setHoveredCell(stats.working > 0 ? `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.pct}% (${stats.onIb}/${stats.working} on IB)` : `${fmtDate(d)} ${fmtHourMark(hr)} — nobody on shift`)}
+                          onMouseLeave={() => setHoveredCell(null)}
+                          className="h-7 rounded cursor-default transition-transform hover:scale-105"
+                          style={{ backgroundColor: stats.working > 0 ? heatColor(stats.pct, true) : "#f1f5f9" }}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="flex items-center justify-between mt-2 flex-wrap gap-2">
+          <div className="flex items-center gap-3 text-[10px] text-slate-400">
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: heatColor(95, true) }} /> High</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: heatColor(70, true) }} /> Mid</span>
+            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: heatColor(40, true) }} /> Low</span>
+          </div>
+          <span className="text-[11px] font-mono text-slate-500 h-4">{hoveredCell || "hover a cell for detail"}</span>
+        </div>
       </div>
     </div>
   );
@@ -1915,8 +1963,10 @@ function evaluatePto(t) {
     status = "Above PTO guideline"; tone = "sky";
     rec = `${committedPto}d taken/booked so far, already above the top of the ${PTO_GUIDELINE.min}-${PTO_GUIDELINE.max}d guideline. PTO is unlimited so this isn't a problem on its own — with about ${monthsRemaining}mo left in the year, at their average pace so far they'd add roughly ${projectedRemainingPto} more day(s) beyond what's already booked, landing around ${projectedYearEndTotal}d by year-end. Just flagging for visibility.`;
   } else if (nearCap && trendingOverCap) {
+    status = "Trending over guideline"; tone = "amber";
     rec = `${committedPto}d taken/booked so far — within the ${PTO_GUIDELINE.min}-${PTO_GUIDELINE.max}d guideline today, but with about ${monthsRemaining}mo still left in the year, their pace projects to about ${projectedYearEndTotal}d by year-end — above the ${PTO_GUIDELINE.max}d top of the guideline. Worth keeping an eye on before it gets there.`;
   } else if (nearCap) {
+    status = "Near PTO cap"; tone = "amber";
     rec = `${committedPto}d taken/booked so far (pace projects to about ${projectedYearEndTotal}d by year-end) — within the ${PTO_GUIDELINE.min}-${PTO_GUIDELINE.max}d guideline, but only ${roomUntilCap}d below the top of it with about ${monthsRemaining}mo still left in the year. Worth keeping an eye on pace so it doesn't run past the guideline.`;
   } else {
     rec = `${committedPto}d taken/booked so far (pace projects to about ${projectedPto}d for the year) — within the ${PTO_GUIDELINE.min}-${PTO_GUIDELINE.max}d guideline.`;
@@ -2524,7 +2574,7 @@ function matchScorecardCSVs({ ticketsRows, productivityRows, qaRows, histRows },
   return { results, unmatched: [...new Set(unmatched)] };
 }
 
-function PtoEvalTab({ employees, timeOff, notes, updateNote, updateTimeOff, ptoEvalView, setPtoEvalView }) {
+function PtoEvalTab({ employees, timeOff, notes, updateNote, updateTimeOff }) {
   const [copiedId, setCopiedId] = useState(null);
   const [fallbackText, setFallbackText] = useState(null);
   const [openDetails, setOpenDetails] = useState({}); // empId -> bool
@@ -2542,42 +2592,28 @@ function PtoEvalTab({ employees, timeOff, notes, updateNote, updateTimeOff, ptoE
 
   return (
     <div className="p-4 sm:p-6">
-      <div className="flex items-start justify-end flex-wrap gap-2 mb-1">
-        <div className="flex items-center gap-1 rounded-full border p-0.5 flex-shrink-0" style={{ borderColor: TH.border }}>
-          {[{ id: "cards", label: "Cards" }, { id: "table", label: "Table" }].map((v) => (
-            <button
-              key={v.id}
-              onClick={() => setPtoEvalView(v.id)}
-              className="text-xs px-3 py-1 rounded-full font-semibold transition-colors"
-              style={ptoEvalView === v.id ? { backgroundColor: TH.navy, color: "#fff" } : { color: TH.textMid }}
-            >
-              {v.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {ptoEvalView === "table" ? (
-        <div className="overflow-auto border border-slate-200 rounded-lg mb-3">
-          <table className="min-w-full text-sm">
-            <thead className="bg-white">
-              <tr className="text-[11px] font-mono text-slate-500">
-                <th className="text-left px-3 py-2">Care Advocate</th>
-                <th className="text-left px-2 py-2">Status</th>
-                <th className="text-left px-2 py-2">PTO ({PTO_GUIDELINE.min}-{PTO_GUIDELINE.max}d)</th>
-                <th className="text-left px-2 py-2">Sick ({SICK_GUIDELINE.min}-{SICK_GUIDELINE.max}d)</th>
-                <th className="text-left px-2 py-2">Recommendation</th>
-                <th className="px-2 py-2"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {employees.map((emp, i) => {
-                const t = timeOff[emp.id] || { allPto: 0, allSick: 0, pastPto: 0, pastSick: 0, upcomingPto: 0, upcomingSick: 0 };
-                const ev = evaluatePto(t);
-                const note = notes[emp.id] || "";
-                const emailText = buildPtoEmailText(emp, t, ev, note, quarter);
-                return (
-                  <tr key={emp.id} className={i % 2 ? "bg-slate-50" : "bg-white"}>
+      <div className="overflow-auto border border-slate-200 rounded-lg mb-3">
+        <table className="min-w-full text-sm">
+          <thead className="bg-white">
+            <tr className="text-[11px] font-mono text-slate-500">
+              <th className="text-left px-3 py-2">Care Advocate</th>
+              <th className="text-left px-2 py-2">Status</th>
+              <th className="text-left px-2 py-2">PTO ({PTO_GUIDELINE.min}-{PTO_GUIDELINE.max}d)</th>
+              <th className="text-left px-2 py-2">Sick ({SICK_GUIDELINE.min}-{SICK_GUIDELINE.max}d)</th>
+              <th className="text-left px-2 py-2">Recommendation</th>
+              <th className="px-2 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {employees.map((emp, i) => {
+              const t = timeOff[emp.id] || { allPto: 0, allSick: 0, pastPto: 0, pastSick: 0, upcomingPto: 0, upcomingSick: 0 };
+              const ev = evaluatePto(t);
+              const note = notes[emp.id] || "";
+              const emailText = buildPtoEmailText(emp, t, ev, note, quarter);
+              const isOpen = !!openDetails[emp.id];
+              return (
+                <React.Fragment key={emp.id}>
+                  <tr className={i % 2 ? "bg-slate-50" : "bg-white"}>
                     <td className="px-3 py-2">
                       <div className="text-sm font-medium text-slate-900 whitespace-nowrap">{emp.name}</div>
                       <div className="text-[10px] text-slate-500 font-mono">{emp.team}</div>
@@ -2598,138 +2634,60 @@ function PtoEvalTab({ employees, timeOff, notes, updateNote, updateTimeOff, ptoE
                       {ev.sickFlag && <div className={`mt-0.5 ${ev.committedSick > SICK_GUIDELINE.max ? "text-rose-700" : "text-amber-700"}`}>{ev.sickFlag}</div>}
                     </td>
                     <td className="px-2 py-2 text-right">
-                      <button
-                        onClick={() => copy(emp.id, emailText)}
-                        className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 whitespace-nowrap"
-                      >
-                        {copiedId === emp.id ? <><Check className="w-3 h-3" /> Copied</> : <><Copy className="w-3 h-3" /> Copy</>}
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => setOpenDetails((p) => ({ ...p, [emp.id]: !p[emp.id] }))}
+                          className="text-[11px] px-2 py-1 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 whitespace-nowrap"
+                        >
+                          {isOpen ? "▾ Edit" : "▸ Edit"}
+                        </button>
+                        <button
+                          onClick={() => copy(emp.id, emailText)}
+                          className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 whitespace-nowrap"
+                        >
+                          {copiedId === emp.id ? <><Check className="w-3 h-3" /> Copied</> : <><Copy className="w-3 h-3" /> Copy</>}
+                        </button>
+                      </div>
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        {employees.map((emp) => {
-          const t = timeOff[emp.id] || { allPto: 0, allSick: 0, pastPto: 0, pastSick: 0, upcomingPto: 0, upcomingSick: 0 };
-          const ev = evaluatePto(t);
-          const note = notes[emp.id] || "";
-          const emailText = buildPtoEmailText(emp, t, ev, note, quarter);
-          const sickTile = ev.committedSick === 0
-            ? "bg-slate-50 text-slate-400 border-slate-100"
-            : ev.committedSick > SICK_GUIDELINE.max
-              ? "bg-rose-50 text-rose-800 border-rose-200"
-              : ev.sickNearCap
-                ? "bg-amber-50 text-amber-800 border-amber-200"
-                : "bg-teal-50 text-teal-800 border-teal-200";
-
-          return (
-            <div key={emp.id} className="border border-slate-200 rounded-lg bg-white p-3.5 flex flex-col">
-              <div className="flex items-start justify-between gap-2 mb-2.5">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-slate-900 truncate">{emp.name}</div>
-                  <div className="text-[10px] text-slate-500 font-mono">{emp.team}</div>
-                </div>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium whitespace-nowrap shrink-0 ${PTO_TONE_CLASSES[ev.tone]}`}>{ev.status}</span>
-              </div>
-
-              <div className="grid grid-cols-2 gap-1.5 mb-2.5">
-                <div className={`rounded-lg border p-2 text-center ${PTO_TONE_CLASSES[ev.tone]}`}>
-                  <div className="text-xl font-bold">{ev.committedPto}<span className="text-xs font-semibold">d</span></div>
-                  <div className="text-[9px] font-mono uppercase tracking-wide opacity-70 mt-0.5">PTO</div>
-                </div>
-                <div className={`rounded-lg border p-2 text-center ${sickTile}`}>
-                  <div className="text-xl font-bold">{ev.committedSick}<span className="text-xs font-semibold">d</span></div>
-                  <div className="text-[9px] font-mono uppercase tracking-wide opacity-70 mt-0.5">Sick</div>
-                </div>
-              </div>
-
-              {ev.nearCap && (
-                <div className="text-[10px] text-sky-700 flex items-center gap-1 mb-2">
-                  <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
-                  {ev.trendingOverCap
-                    ? `Trending to ~${ev.projectedYearEndTotal}d by year-end (${ev.monthsRemaining}mo left) — above the ${PTO_GUIDELINE.max}d guideline`
-                    : `${ev.roomUntilCap}d left before PTO guideline cap (${ev.monthsRemaining}mo left in year)`}
-                </div>
-              )}
-              {ev.sickFlag && (
-                <div className={`text-[10px] flex items-center gap-1 mb-2 ${ev.committedSick > SICK_GUIDELINE.max ? "text-rose-700" : "text-amber-700"}`}>
-                  <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
-                  {ev.committedSick > SICK_GUIDELINE.max
-                    ? "Sick above guideline"
-                    : ev.sickTrendingOverCap
-                      ? `Sick trending to ~${ev.projectedSick}d by year-end — above guideline`
-                      : `Sick within ${ev.sickRoomUntilCap}d of guideline cap`}
-                </div>
-              )}
-
-              <button
-                onClick={() => setOpenDetails((p) => ({ ...p, [emp.id]: !p[emp.id] }))}
-                className="text-[11px] text-teal-700 hover:text-teal-900 font-medium text-left mt-auto pt-1"
-              >
-                {openDetails[emp.id] ? "▾ Hide details" : "▸ Details & email"}
-              </button>
-
-              {openDetails[emp.id] && (
-                <div className="mt-2.5 pt-2.5 border-t border-slate-100">
-                  <div className="mb-2">
-                    <div className="flex justify-between text-[10px] font-mono text-slate-500 mb-1">
-                      <span>PTO guideline {PTO_GUIDELINE.min}-{PTO_GUIDELINE.max}d</span>
-                    </div>
-                    <GuidelineBar committed={ev.committedPto} guideline={PTO_GUIDELINE} scaleMax={20} color={TH.teal} />
-                  </div>
-                  <div className="mb-3">
-                    <div className="flex justify-between text-[10px] font-mono text-slate-500 mb-1">
-                      <span>Sick guideline {SICK_GUIDELINE.min}-{SICK_GUIDELINE.max}d</span>
-                    </div>
-                    <GuidelineBar committed={ev.committedSick} guideline={SICK_GUIDELINE} scaleMax={8} color="#f43f5e" />
-                  </div>
-
-                  <p className="text-xs text-slate-700 mb-1">{ev.rec}</p>
-                  {ev.sickFlag && <p className={`text-xs mb-2 ${ev.committedSick > SICK_GUIDELINE.max ? "text-rose-700" : "text-amber-700"}`}>{ev.sickFlag}</p>}
-
-                  <div className="mb-3 pt-2 border-t border-slate-100">
-                    <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1.5">Balances (days)</div>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {["allPto", "allSick", "pastPto", "pastSick", "upcomingPto", "upcomingSick"].map((f) => (
-                        <div key={f}>
-                          <label className="block text-[9px] font-mono text-slate-400 mb-0.5">
-                            {{ allPto: "All PTO", allSick: "All Sick", pastPto: "Past PTO", pastSick: "Past Sick", upcomingPto: "Upcoming PTO", upcomingSick: "Upcoming Sick" }[f]}
-                          </label>
-                          <input
-                            type="number" step="0.25" value={t[f]}
-                            onChange={(e) => updateTimeOff(emp.id, f, e.target.value)}
-                            className="w-full text-xs bg-white border border-slate-300 rounded px-1.5 py-1 text-center text-slate-900"
+                  {isOpen && (
+                    <tr className={i % 2 ? "bg-slate-50" : "bg-white"}>
+                      <td colSpan={6} className="px-3 pb-4 pt-1 border-b border-slate-200">
+                        <div className="border-t border-slate-100 pt-3">
+                          <div className="mb-3">
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1.5">Balances (days)</div>
+                            <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 max-w-xl">
+                              {["allPto", "allSick", "pastPto", "pastSick", "upcomingPto", "upcomingSick"].map((f) => (
+                                <div key={f}>
+                                  <label className="block text-[9px] font-mono text-slate-400 mb-0.5">
+                                    {{ allPto: "All PTO", allSick: "All Sick", pastPto: "Past PTO", pastSick: "Past Sick", upcomingPto: "Upcoming PTO", upcomingSick: "Upcoming Sick" }[f]}
+                                  </label>
+                                  <input
+                                    type="number" step="0.25" value={t[f]}
+                                    onChange={(e) => updateTimeOff(emp.id, f, e.target.value)}
+                                    className="w-full text-xs bg-white border border-slate-300 rounded px-1.5 py-1 text-center text-slate-900"
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <textarea
+                            value={note}
+                            onChange={(e) => updateNote(emp.id, e.target.value)}
+                            placeholder="Add a manager note to include in the email (optional)…"
+                            rows={2}
+                            className="w-full max-w-xl bg-white border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-900 resize-none"
                           />
                         </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <textarea
-                    value={note}
-                    onChange={(e) => updateNote(emp.id, e.target.value)}
-                    placeholder="Add a manager note to include in the email (optional)…"
-                    rows={2}
-                    className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-900 mb-2 resize-none"
-                  />
-
-                  <button
-                    onClick={() => copy(emp.id, emailText)}
-                    className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700"
-                  >
-                    {copiedId === emp.id ? <><Check className="w-3.5 h-3.5" /> Copied</> : <><Copy className="w-3.5 h-3.5" /> Copy for email</>}
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
-      )}
 
       {fallbackText && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setFallbackText(null)}>
@@ -3448,7 +3406,6 @@ export default function ManagerSchedule() {
   const [showPastList, setShowPastList] = useState(false);
   const [showPastGrid, setShowPastGrid] = useState(false);
   const [holidayView, setHolidayView] = useState("table"); // 'table' | 'cards'
-  const [ptoEvalView, setPtoEvalView] = useState("cards"); // 'cards' | 'table' — board view removed
   const [undoStack, setUndoStack] = useState([]); // snapshots of `data` from right before each change, most recent last
   const [checkingLock, setCheckingLock] = useState(true);
   const [unlocked, setUnlocked] = useState(false);
@@ -4445,8 +4402,6 @@ export default function ManagerSchedule() {
           notes={data.ptoEvalNotes || {}}
           updateNote={updatePtoNote}
           updateTimeOff={updateTimeOff}
-          ptoEvalView={ptoEvalView}
-          setPtoEvalView={setPtoEvalView}
         />
       )}
 
