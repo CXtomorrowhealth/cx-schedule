@@ -4169,13 +4169,14 @@ export default function ManagerSchedule() {
                               {entries.map((entry) => {
                                 const emp = employees.find((e) => e.id === entry.empId);
                                 return (
-                                  <div
-                                    key={entry.id}
-                                    title={`${emp ? emp.name : entry.empId} — ${entry.label} — ${fmtDate(d)}`}
-                                    className="flex items-center justify-between gap-1 text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800"
-                                  >
-                                    <span className="truncate">{emp ? emp.name.split(" ")[0] : entry.empId}</span>
-                                    <button onClick={() => removeTimeOffDate(entry.id)} className="text-indigo-400 hover:text-rose-500 shrink-0"><X className="w-2.5 h-2.5" /></button>
+                                  <div key={entry.id} className="relative group">
+                                    <div className="flex items-center justify-between gap-1 text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800">
+                                      <span className="truncate">{emp ? emp.name.split(" ")[0] : entry.empId}</span>
+                                      <button onClick={() => removeTimeOffDate(entry.id)} className="text-indigo-400 hover:text-rose-500 shrink-0"><X className="w-2.5 h-2.5" /></button>
+                                    </div>
+                                    <div className="absolute z-30 hidden group-hover:block bottom-full left-0 mb-1 whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1 rounded shadow-lg pointer-events-none">
+                                      {emp ? emp.name : entry.empId} — {entry.label} — {fmtDate(d)}
+                                    </div>
                                   </div>
                                 );
                               })}
