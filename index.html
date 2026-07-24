@@ -12,8 +12,7 @@
     "react": "https://esm.sh/react@18.2.0",
     "react-dom": "https://esm.sh/react-dom@18.2.0",
     "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
-    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react",
-    "recharts": "https://esm.sh/recharts@2.12.7?external=react,react-dom"
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react"
   }
 }
 </script>
@@ -33,7 +32,6 @@
 <script type="text/babel" data-type="module" data-presets="react">
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Plus, Trash2, X, RefreshCw, Users, CalendarPlus, Save, AlertCircle, AlertTriangle, CalendarDays, Gift, Clock3, UserCheck, Mail, Copy, Check, Pencil, Gauge, Microscope, Lock, FileSpreadsheet, Download, Undo2, Palmtree, Thermometer, TrendingDown } from "lucide-react";
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
 
 const STORAGE_KEY = "cx-schedule-v1";
 // Better than a plaintext constant, but still a client-side check — someone determined enough
@@ -1669,58 +1667,6 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
     return dow !== 0 && dow !== 6;
   });
 
-  // Skill coverage breakdown across the visible weekday window — normalized by how many
-  // people were actually on duty each day, not just a raw count of task assignments.
-  // For each skill: average, across days, of (distinct employees covering it that day / employees working that day).
-  // Handoffs / Customer Support Outreach are excluded here specifically — they roll up into other
-  // skills already, so breaking them out separately just adds noise to this particular view.
-  const SKILL_COVERAGE_EXCLUDE = ["Handoffs", "Customer Support Outreach"];
-  // These skills just need ONE person on them to be fine — showing "25%" for a skill where 1
-  // person out of 4 working that day is a completely healthy, fully-staffed outcome was
-  // misleading. They get a days-covered view instead of a % bar.
-  const SINGLE_COVERAGE_SKILLS = ["Review", "Comments", "COMs", "Urgents", "Patient Ops Support", "Project"];
-  const isCoverageSkill = (name) => FUNCTION_LIBRARY.includes(name) && !SKILL_COVERAGE_EXCLUDE.includes(name);
-  const allSkillsSeen = new Set();
-  employees.forEach((emp) => weekdayDates.forEach((d) => {
-    const c = cells[cellKey(emp.id, d)];
-    if (c && !c.status) (c.tasks || []).forEach((t) => { if (isCoverageSkill(t.name)) allSkillsSeen.add(t.name); });
-  }));
-  const skillPctSums = {};
-  const skillDayCounts = {}; // { skillName: [headcount per weekday, in order] } — for the days-covered view
-  weekdayDates.forEach((d) => {
-    let working = 0;
-    const empCountPerSkill = {};
-    employees.forEach((emp) => {
-      const c = cells[cellKey(emp.id, d)];
-      if (c && !c.status) {
-        working += 1;
-        const seen = new Set();
-        (c.tasks || []).forEach((t) => { if (isCoverageSkill(t.name)) seen.add(t.name); });
-        seen.forEach((s) => { empCountPerSkill[s] = (empCountPerSkill[s] || 0) + 1; });
-      }
-    });
-    allSkillsSeen.forEach((s) => {
-      const pct = working > 0 ? ((empCountPerSkill[s] || 0) / working) * 100 : 0;
-      skillPctSums[s] = (skillPctSums[s] || 0) + pct;
-      if (!skillDayCounts[s]) skillDayCounts[s] = [];
-      skillDayCounts[s].push(empCountPerSkill[s] || 0);
-    });
-  });
-  const dayCountForAvg = weekdayDates.length || 1;
-  const pieData = Array.from(allSkillsSeen)
-    .filter((name) => !SINGLE_COVERAGE_SKILLS.includes(name))
-    .map((name) => ({ name, pct: Math.round((skillPctSums[name] || 0) / dayCountForAvg) }))
-    .filter((e) => e.pct > 0)
-    .sort((a, b) => b.pct - a.pct);
-  const singleCoverageData = Array.from(allSkillsSeen)
-    .filter((name) => SINGLE_COVERAGE_SKILLS.includes(name))
-    .map((name) => {
-      const counts = skillDayCounts[name] || [];
-      const daysCovered = counts.filter((c) => c >= 1).length;
-      return { name, counts, daysCovered, totalDays: weekdayDates.length };
-    })
-    .sort((a, b) => a.daysCovered - b.daysCovered);
-
   // Hourly IB coverage heatmap: for each weekday and each hour, % of on-duty staff covering IB
   // that specific hour. OOO time (full-day or a partial OOO window) is excluded from both the
   // numerator and denominator for the hour(s) it actually overlaps — it isn't counted as coverage.
@@ -1747,19 +1693,11 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
     return { working, onIb, pct: working > 0 ? Math.round((onIb / working) * 100) : 0 };
   };
 
-  // ── Redesigned overview below: KPI cards + trend chart + flagged skill gaps + a cleaner
-  // hoverable heatmap, all built from the exact same coverageStats/ibCoverageStats/pieData/
-  // ibHourlyStats computations above — just presented as something scannable at a glance
-  // instead of three separate wide tables.
+  // ── Redesigned overview below: KPI cards + a cleaner hoverable heatmap, all built from the
+  // exact same coverageStats/ibCoverageStats/ibHourlyStats computations above.
   const todayDate = weekdayDates.find((d) => isToday(d)) || weekdayDates[weekdayDates.length - 1];
   const todayStats = todayDate ? coverageStats(todayDate, null) : null;
   const todayIb = todayDate ? ibCoverageStats(todayDate) : null;
-
-  const trendData = weekdayDates.map((d) => {
-    const s = coverageStats(d, null);
-    const ib = ibCoverageStats(d);
-    return { date: fmtDate(d), working: s.coveragePct, ooo: s.oooPct, ib: ib.ibPct };
-  });
 
   let lowest = null;
   weekdayDates.forEach((d) => {
@@ -1771,7 +1709,6 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
     });
   });
 
-  const SKILL_FLOOR = 45; // below this, a skill is flagged as under-covered — adjust to taste
   const [hoveredCell, setHoveredCell] = useState(null);
 
   const KpiCard = ({ icon: Icon, label, value, sub, accent }) => (
@@ -1794,98 +1731,6 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
         <KpiCard icon={Clock3} label="IB coverage today" value={todayIb ? `${todayIb.ibPct}%` : "—"} sub={todayIb ? `${todayIb.onIb}/${todayIb.total} on IB` : ""} accent={TH.blue} />
         <KpiCard icon={TrendingDown} label="Lowest IB point" value={lowest ? `${fmtDate(lowest.date)} ${fmtHourMark(lowest.hour)}` : "—"} sub={lowest ? `${lowest.pct}% coverage` : "No data yet"} accent="#c0392b" />
       </div>
-
-      {/* Coverage trend chart */}
-      <div className="border rounded-lg bg-white p-4 mb-6" style={{ borderColor: TH.border }}>
-        <h2 className="text-xs font-mono uppercase tracking-wide mb-3" style={{ color: TH.tealDark }}>Coverage this window</h2>
-        {trendData.length === 0 ? (
-          <div className="text-xs text-slate-400 italic py-6 text-center">No dates in view yet.</div>
-        ) : (
-          <ResponsiveContainer width="100%" height={220}>
-            <AreaChart data={trendData} margin={{ left: -20, right: 10 }}>
-              <defs>
-                <linearGradient id="workingFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={TH.teal} stopOpacity={0.35} />
-                  <stop offset="100%" stopColor={TH.teal} stopOpacity={0.02} />
-                </linearGradient>
-                <linearGradient id="ibFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={TH.blue} stopOpacity={0.3} />
-                  <stop offset="100%" stopColor={TH.blue} stopOpacity={0.02} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" vertical={false} />
-              <XAxis dataKey="date" tick={{ fontSize: 11, fill: TH.textMuted }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: TH.textMuted }} axisLine={false} tickLine={false} width={36} />
-              <ReferenceLine y={70} stroke="#e0685a" strokeDasharray="4 3" label={{ value: "target", position: "insideTopRight", fontSize: 10, fill: "#e0685a" }} />
-              <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${TH.border}` }} />
-              <Area type="monotone" dataKey="working" name="Working %" stroke={TH.teal} fill="url(#workingFill)" strokeWidth={2} />
-              <Area type="monotone" dataKey="ib" name="IB coverage %" stroke={TH.blue} fill="url(#ibFill)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
-        )}
-        <div className="flex items-center gap-4 mt-1 text-[11px]" style={{ color: TH.textMuted }}>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: TH.teal }} /> Working</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: TH.blue }} /> IB coverage</span>
-          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-rose-400" /> Dashed line = 70% target</span>
-        </div>
-      </div>
-
-      {/* Skill coverage, sorted, with under-covered skills flagged */}
-      <h2 className="text-xs font-mono text-teal-700 mb-2 uppercase tracking-wide">Skill Coverage — needs broad staffing</h2>
-      {pieData.length === 0 ? (
-        <div className="text-xs text-slate-400 italic border border-slate-200 rounded-lg p-4 mb-6">No skills assigned in this window yet.</div>
-      ) : (
-        <div className="border border-slate-200 rounded-lg p-5 bg-white space-y-2.5 mb-6">
-          {pieData.map((entry) => {
-            const low = entry.pct < SKILL_FLOOR;
-            return (
-              <div key={entry.name} className="flex items-center gap-3">
-                <span className="w-40 shrink-0 text-xs text-slate-700 truncate">{entry.name}</span>
-                <div className="flex-1 h-2.5 rounded-full bg-slate-100 overflow-hidden relative">
-                  <div className="h-full rounded-full" style={{ width: `${Math.min(100, entry.pct)}%`, backgroundColor: low ? "#e0685a" : taskColorHex(entry.name) }} />
-                  <div className="absolute top-0 bottom-0 border-l border-dashed border-slate-300" style={{ left: `${SKILL_FLOOR}%` }} />
-                </div>
-                <span className="w-10 shrink-0 text-xs font-mono text-right" style={{ color: low ? "#c0392b" : TH.textMid }}>{entry.pct}%</span>
-                {low && <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" title={`Under the ${SKILL_FLOOR}% floor`} />}
-              </div>
-            );
-          })}
-          <p className="text-[10px] text-slate-400 pt-1">Dashed line = {SKILL_FLOOR}% floor. Anything under it is flagged as under-covered.</p>
-        </div>
-      )}
-
-      <h2 className="text-xs font-mono text-teal-700 mb-2 uppercase tracking-wide">Skill Coverage — just needs 1 person</h2>
-      {singleCoverageData.length === 0 ? (
-        <div className="text-xs text-slate-400 italic border border-slate-200 rounded-lg p-4 mb-6">No skills assigned in this window yet.</div>
-      ) : (
-        <div className="border border-slate-200 rounded-lg p-5 bg-white space-y-3 mb-6">
-          {singleCoverageData.map((entry) => {
-            const gap = entry.daysCovered < entry.totalDays;
-            return (
-              <div key={entry.name} className="flex items-center gap-3">
-                <span className="w-40 shrink-0 text-xs text-slate-700 truncate">{entry.name}</span>
-                <div className="flex gap-1">
-                  {entry.counts.map((c, i) => (
-                    <div
-                      key={i}
-                      className="w-5 h-5 rounded flex items-center justify-center text-[9px] font-bold text-white shrink-0"
-                      style={{ backgroundColor: c >= 1 ? TH.teal : "#e0685a" }}
-                      title={`${fmtDate(weekdayDates[i])}: ${c} covering`}
-                    >
-                      {c}
-                    </div>
-                  ))}
-                </div>
-                <span className="text-xs font-mono ml-auto shrink-0" style={{ color: gap ? "#c0392b" : TH.textMid }}>
-                  {entry.daysCovered}/{entry.totalDays} days covered
-                </span>
-                {gap && <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" title="At least one day had nobody on this" />}
-              </div>
-            );
-          })}
-          <p className="text-[10px] text-slate-400 pt-1">Each box is a weekday — the number is how many people covered it. Red = nobody did that day.</p>
-        </div>
-      )}
 
       {/* Cleaner hourly IB heatmap — smooth color scale, hover for exact numbers instead of
           cramming both % and counts into every cell */}
