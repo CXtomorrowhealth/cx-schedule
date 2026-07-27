@@ -1181,6 +1181,19 @@ function ibCoverageColor(pct) {
   return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
 }
 
+// Colors a Time Off calendar chip by its actual type, so the type is visible without hovering.
+// Real entries are sometimes free-form (e.g. "Sick 0.25 day", "0.25 Day") rather than one of
+// the exact standard labels, so this matches by keyword rather than exact string.
+function timeOffEntryColor(label) {
+  const l = (label || "").toLowerCase();
+  if (l.includes("sick")) return { bg: "#fef2f2", text: "#be123c" };
+  if (l.includes("flex")) return { bg: "#eff6ff", text: "#0369a1" };
+  if (l.includes("loa")) return { bg: "#f1f5f9", text: "#475569" };
+  if (l.includes("floating")) return { bg: "#f0fdf9", text: "#007d5a" };
+  if (l.includes("approved")) return { bg: "#eff6ff", text: "#1e40af" };
+  return { bg: "#f5f3ff", text: "#5b21b6" }; // fallback for anything else, e.g. a plain "0.5 day"
+}
+
 function TimelineBar({ label, start, end, color }) {
   const s = toMinutes(start);
   const e = toMinutes(end);
@@ -1789,17 +1802,7 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
                         : singleCoverage
                           ? (covered ? TH.teal : "#e0685a")
                           : ibCoverageColor(stats.pct);
-                      const namesPart = stats.ibNames.length
-                        ? ` — on IB: ${stats.ibNames.join(", ")}`
-                        : "";
-                      const othersPart = stats.workingOnlyNames.length
-                        ? ` · working (not IB): ${stats.workingOnlyNames.join(", ")}`
-                        : "";
-                      const detail = stats.working === 0
-                        ? `${fmtDate(d)} ${fmtHourMark(hr)} — nobody on shift`
-                        : singleCoverage
-                          ? `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.onIb}/${stats.working} on IB (just needs 1)${namesPart}${othersPart}`
-                          : `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.pct}% (${stats.onIb}/${stats.working} on IB)${namesPart}${othersPart}`;
+                      const detail = { date: d, hour: hr, singleCoverage, ...stats };
                       return (
                         <td key={d} className="p-0.5">
                           <div
@@ -1823,7 +1826,47 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
           <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(10) }} /> Under 20%</span>
           <span className="flex items-center gap-1 ml-2"><span className="text-slate-300">·1</span> = just needs 1 person (8-9am, 5-8pm)</span>
         </div>
-        <div className="text-[11px] font-mono text-slate-500 mt-1.5 min-h-[14px]">{hoveredCell || "hover a cell for detail"}</div>
+
+        {/* Hover detail — a real visual breakdown instead of a plain sentence: header,
+            a colored ratio bar, and separate chip rows for who's on IB vs just working. */}
+        <div className="mt-2 min-h-[70px]">
+          {!hoveredCell ? (
+            <div className="text-[11px] text-slate-400 italic py-2">Hover a cell for the breakdown.</div>
+          ) : hoveredCell.working === 0 ? (
+            <div className="border border-slate-200 rounded-lg p-2.5 bg-slate-50">
+              <div className="text-xs font-semibold text-slate-500">{fmtDate(hoveredCell.date)} · {fmtHourMark(hoveredCell.hour)}</div>
+              <div className="text-[11px] text-slate-400 mt-0.5">Nobody on shift this hour.</div>
+            </div>
+          ) : (
+            <div className="border border-slate-200 rounded-lg p-2.5" style={{ backgroundColor: `${hoveredCell.onIb >= 1 ? TH.teal : "#e0685a"}0D` }}>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-semibold text-slate-700">{fmtDate(hoveredCell.date)} · {fmtHourMark(hoveredCell.hour)}</span>
+                <span
+                  className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white"
+                  style={{ backgroundColor: hoveredCell.singleCoverage ? (hoveredCell.onIb >= 1 ? TH.teal : "#e0685a") : ibCoverageColor(hoveredCell.pct) }}
+                >
+                  {hoveredCell.singleCoverage ? `${hoveredCell.onIb}/${hoveredCell.working} (needs 1)` : `${hoveredCell.pct}% on IB`}
+                </span>
+              </div>
+              <div className="h-2 rounded-full bg-slate-200 overflow-hidden flex mb-2">
+                <div className="h-full" style={{ width: `${(hoveredCell.onIb / hoveredCell.working) * 100}%`, backgroundColor: TH.teal }} />
+                <div className="h-full flex-1" style={{ backgroundColor: "#cbd5e1" }} />
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {hoveredCell.ibNames.map((n) => (
+                  <span key={n} className="text-[10px] px-1.5 py-0.5 rounded-full font-medium text-white" style={{ backgroundColor: TH.teal }}>{n}</span>
+                ))}
+                {hoveredCell.workingOnlyNames.map((n) => (
+                  <span key={n} className="text-[10px] px-1.5 py-0.5 rounded-full font-medium bg-slate-200 text-slate-600">{n}</span>
+                ))}
+              </div>
+              <div className="flex items-center gap-3 mt-1.5 text-[9px] text-slate-400">
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full" style={{ backgroundColor: TH.teal }} /> On IB</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-slate-300" /> Working, not IB</span>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -2951,6 +2994,8 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
 
   const acceptedThisMonth = employees.filter((e) => qaEvals[e.id]?.[selectedMonth]).length;
   const allMonthsWithData = [...new Set(employees.flatMap((e) => Object.keys(qaEvals[e.id] || {})))].sort();
+  const monthComplete = acceptedThisMonth > 0 && acceptedThisMonth === employees.length;
+  const monthPartial = acceptedThisMonth > 0 && !monthComplete;
 
   return (
     <div className="p-4 sm:p-6">
@@ -2958,13 +3003,29 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
         <button onClick={() => setSelectedMonth((m) => shiftMonthKey(m, -1))} className="w-7 h-7 rounded border border-slate-300 text-slate-500 hover:border-slate-400 flex items-center justify-center">‹</button>
         <span className="text-sm font-semibold px-3 py-1 rounded-full" style={{ backgroundColor: TH.navy, color: "#fff" }}>{monthKeyLabel(selectedMonth)}</span>
         <button onClick={() => setSelectedMonth((m) => shiftMonthKey(m, 1))} className="w-7 h-7 rounded border border-slate-300 text-slate-500 hover:border-slate-400 flex items-center justify-center">›</button>
+        {monthComplete && (
+          <span className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: "#f0fdf9", color: "#0d7d5a", border: "1px solid #a7f3d0" }}>
+            <Check className="w-3 h-3" /> Complete — {acceptedThisMonth}/{employees.length} accepted
+          </span>
+        )}
+        {monthPartial && (
+          <span className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: "#fffbeb", color: "#92400e", border: "1px solid #fde68a" }}>
+            <AlertTriangle className="w-3 h-3" /> Partial — {acceptedThisMonth}/{employees.length} accepted
+          </span>
+        )}
         {selectedMonth !== currentMonthKey() && (
           <button onClick={() => setSelectedMonth(currentMonthKey())} className="text-[11px] text-slate-500 hover:text-slate-700 underline ml-1">Jump to current month</button>
         )}
         <span className="text-[11px] text-slate-400 font-mono ml-auto">{acceptedThisMonth}/{employees.length} accepted for this month</span>
       </div>
 
-      <div className="border border-slate-200 rounded-lg p-4 mb-6 bg-slate-50/60">
+      <div
+        className="border rounded-lg p-4 mb-6"
+        style={{
+          borderColor: monthComplete ? "#a7f3d0" : monthPartial ? "#fde68a" : TH.border,
+          backgroundColor: monthComplete ? "#f0fdf9" : monthPartial ? "#fffbeb" : "#f8fafc",
+        }}
+      >
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-xs font-mono text-slate-500 uppercase tracking-wide">Generate {monthKeyLabel(selectedMonth)} from CSVs</h2>
           {(csvFiles.tickets || csvFiles.productivity || csvFiles.qa || csvFiles.hist) && (
@@ -3366,66 +3427,55 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
   );
 }
 
-function HolidaysTab({ holidays, nameOptions, updateHolidayField, updateMetric, addVolunteer, removeVolunteer, updateVolunteer, holidayView, setHolidayView }) {
+const HOLIDAY_ICON_COLOR = "#002334"; // TH navy — one generic icon for every holiday, no per-type icons
+const DEFAULT_VOLUNTEERS_NEEDED = 3;
+
+function holidayStatusColor(secured, needed) {
+  if (secured >= needed) return "#15803d";
+  if (secured >= needed / 2) return "#f59e0b";
+  return "#dc2626";
+}
+function holidayBorderFor(secured, needed) {
+  if (secured >= needed) return "#a7f3d0";
+  if (secured >= needed / 2) return "#fde68a";
+  return "#fecaca";
+}
+function holidayBgFor(secured, needed) {
+  if (secured >= needed) return "#f0fdf9";
+  if (secured >= needed / 2) return "#fffbeb";
+  return "#fef2f2";
+}
+
+function HolidaysTab({ holidays, nameOptions, updateHolidayField, updateMetric, addVolunteer, removeVolunteer, updateVolunteer }) {
   const [showPastHolidays, setShowPastHolidays] = useState(false);
   const upcoming = holidays.filter((h) => daysUntil(h.date) >= 0);
   const past = holidays.filter((h) => daysUntil(h.date) < 0).sort((a, b) => b.date.localeCompare(a.date));
-  const cardProps = { nameOptions, updateHolidayField, updateMetric, addVolunteer, removeVolunteer, updateVolunteer };
-  const tableProps = { nameOptions, updateHolidayField, updateMetric, addVolunteer, removeVolunteer, updateVolunteer };
+  const listProps = { nameOptions, updateHolidayField, updateMetric, addVolunteer, removeVolunteer, updateVolunteer };
 
   return (
     <div className="p-4 sm:p-6">
-      <div className="flex items-center justify-end flex-wrap gap-2 mb-4">
-        <div className="flex items-center gap-1 rounded-full border p-0.5" style={{ borderColor: TH.border }}>
-          {[{ id: "table", label: "Table" }, { id: "cards", label: "Cards" }].map((v) => (
-            <button
-              key={v.id}
-              onClick={() => setHolidayView(v.id)}
-              className="text-xs px-3 py-1 rounded-full font-semibold transition-colors"
-              style={holidayView === v.id ? { backgroundColor: TH.navy, color: "#fff" } : { color: TH.textMid }}
-            >
-              {v.label}
-            </button>
-          ))}
-        </div>
+      <HolidayCoverageList holidays={upcoming} title={`Upcoming (${upcoming.length})`} {...listProps} />
+      <button
+        onClick={() => setShowPastHolidays((v) => !v)}
+        className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 mb-2 font-medium"
+      >
+        {showPastHolidays ? "▾" : "▸"} {showPastHolidays ? "Hide" : "Show"} {past.length} past holiday{past.length === 1 ? "" : "s"}
+      </button>
+      {showPastHolidays && <HolidayCoverageList holidays={past} title={`Past (${past.length})`} muted {...listProps} />}
+      <div className="flex items-center gap-4 mt-1 text-[11px] text-slate-400">
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "#15803d" }} /> Fully covered</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "#f59e0b" }} /> Partially covered</span>
+        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "#dc2626" }} /> Needs volunteers</span>
       </div>
-
-      {holidayView === "cards" ? (
-        <>
-          <h2 className="text-xs font-mono text-teal-700 mb-2 uppercase tracking-wide">Upcoming ({upcoming.length})</h2>
-          <div className="grid gap-3 sm:grid-cols-2 mb-4">
-            {upcoming.map((h) => <HolidayCard key={h.id} h={h} isPast={false} {...cardProps} />)}
-          </div>
-
-          <button
-            onClick={() => setShowPastHolidays((v) => !v)}
-            className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 mb-3 font-medium"
-          >
-            {showPastHolidays ? "▾" : "▸"} {showPastHolidays ? "Hide" : "Show"} {past.length} past holiday{past.length === 1 ? "" : "s"}
-          </button>
-          {showPastHolidays && (
-            <div className="grid gap-3 sm:grid-cols-2 opacity-80">
-              {past.map((h) => <HolidayCard key={h.id} h={h} isPast={true} {...cardProps} />)}
-            </div>
-          )}
-        </>
-      ) : (
-        <>
-          <HolidayTable holidays={upcoming} title={`Upcoming (${upcoming.length})`} {...tableProps} />
-          <button
-            onClick={() => setShowPastHolidays((v) => !v)}
-            className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 mb-2 font-medium"
-          >
-            {showPastHolidays ? "▾" : "▸"} {showPastHolidays ? "Hide" : "Show"} {past.length} past holiday{past.length === 1 ? "" : "s"}
-          </button>
-          {showPastHolidays && <HolidayTable holidays={past} title={`Past (${past.length})`} muted {...tableProps} />}
-        </>
-      )}
     </div>
   );
 }
 
-function HolidayTable({ holidays, title, muted, nameOptions, updateHolidayField, updateMetric, addVolunteer, removeVolunteer, updateVolunteer }) {
+// Sorted least-covered first, generic single-color icon, plain coverage dot (no emoji, no %).
+// Click a row to expand it for full editing — team lead, volunteers, and the MOC/IB/orders/
+// urgents/faxes metrics that used to live in the spreadsheet table.
+function HolidayCoverageList({ holidays, title, muted, nameOptions, updateHolidayField, updateMetric, addVolunteer, removeVolunteer, updateVolunteer }) {
+  const [openId, setOpenId] = useState(null);
   const [newVol, setNewVol] = useState({}); // holidayId -> { name, start, end }
   const setNewVolField = (holidayId, field, value) =>
     setNewVol((p) => ({ ...p, [holidayId]: { ...(p[holidayId] || {}), [field]: value } }));
@@ -3436,100 +3486,118 @@ function HolidayTable({ holidays, title, muted, nameOptions, updateHolidayField,
     setNewVol((p) => ({ ...p, [holidayId]: { name: "", start: "", end: "" } }));
   };
 
+  const sorted = [...holidays].sort((a, b) => {
+    const aNeeded = a.needed || DEFAULT_VOLUNTEERS_NEEDED, bNeeded = b.needed || DEFAULT_VOLUNTEERS_NEEDED;
+    return ((a.volunteers || []).length / aNeeded) - ((b.volunteers || []).length / bNeeded);
+  });
+
   return (
     <div className="mb-6">
       <h2 className={`text-xs font-mono mb-2 uppercase tracking-wide ${muted ? "text-slate-500" : "text-teal-700"}`}>{title}</h2>
-      <div className={`overflow-auto border border-slate-200 rounded-lg ${muted ? "opacity-80" : ""}`}>
-        <table className="min-w-full text-sm">
-          <thead className="bg-white">
-            <tr className="text-[11px] font-mono text-slate-500">
-              <th className="text-left px-3 py-2">Holiday</th>
-              <th className="text-left px-2 py-2">Date</th>
-              <th className="text-left px-2 py-2">Team Lead</th>
-              <th className="text-left px-2 py-2 min-w-[220px]">Volunteers</th>
-              <th className="text-center px-2 py-2">MOC</th>
-              <th className="text-center px-2 py-2">IB</th>
-              <th className="text-center px-2 py-2">Orders</th>
-              <th className="text-center px-2 py-2">Urgents</th>
-              <th className="text-center px-2 py-2">Faxes</th>
-            </tr>
-          </thead>
-          <tbody>
-            {holidays.length === 0 && (
-              <tr><td colSpan={9} className="px-3 py-4 text-xs text-slate-400 italic">None.</td></tr>
-            )}
-            {holidays.map((h, i) => {
-              const volunteers = h.volunteers || [];
-              const dleft = daysUntil(h.date);
-              const nv = newVol[h.id] || { name: "", start: "", end: "" };
-              return (
-                <tr key={h.id} className={i % 2 ? "bg-slate-50" : "bg-white"}>
-                  <td className="px-3 py-2 text-slate-900 font-medium whitespace-nowrap align-top">
+      {sorted.length === 0 && <div className="text-xs text-slate-400 italic border border-slate-200 rounded-lg p-4">None.</div>}
+      <div className={`space-y-2 ${muted ? "opacity-80" : ""}`}>
+        {sorted.map((h) => {
+          const volunteers = h.volunteers || [];
+          const needed = h.needed || DEFAULT_VOLUNTEERS_NEEDED;
+          const dleft = daysUntil(h.date);
+          const isOpen = openId === h.id;
+          const nv = newVol[h.id] || { name: "", start: "", end: "" };
+          const sc = holidayStatusColor(volunteers.length, needed);
+          return (
+            <div key={h.id} className="border rounded-lg overflow-hidden" style={{ borderColor: holidayBorderFor(volunteers.length, needed) }}>
+              <button
+                onClick={() => setOpenId(isOpen ? null : h.id)}
+                className="w-full flex items-center gap-3 px-3 py-2.5 text-left"
+                style={{ backgroundColor: holidayBgFor(volunteers.length, needed) }}
+              >
+                <Gift className="w-6 h-6 shrink-0" style={{ color: HOLIDAY_ICON_COLOR }} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
                     {h.label}
                     {!muted && dleft >= 0 && dleft <= 45 && (
-                      <span className="ml-1.5 text-[9px] font-mono px-1 py-0.5 rounded bg-amber-950 text-amber-300">{dleft}d</span>
+                      <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-amber-950 text-amber-300">{dleft}d</span>
                     )}
-                  </td>
-                  <td className="px-2 py-2 text-slate-600 font-mono text-xs whitespace-nowrap align-top">{fmtDate(h.date)}</td>
-                  <td className="px-2 py-2 align-top">
-                    <input
-                      value={h.teamLead || ""}
-                      onChange={(e) => updateHolidayField(h.id, "teamLead", e.target.value)}
-                      placeholder="—"
-                      className="w-24 text-xs bg-white border border-slate-200 rounded px-1.5 py-1 text-slate-700 placeholder-slate-400"
-                    />
-                  </td>
-                  <td className="px-2 py-2 align-top">
-                    <div className="space-y-1 mb-1.5">
-                      {volunteers.map((v) => (
-                        <div key={v.id} className="flex items-center gap-1 text-xs bg-white border border-slate-200 rounded px-1.5 py-1">
-                          <input
-                            list={`holiday-names-${h.id}`}
-                            value={v.name}
-                            onChange={(e) => updateVolunteer(h.id, v.id, "name", e.target.value)}
-                            className="flex-1 min-w-0 bg-transparent font-medium text-slate-900 focus:bg-slate-50 rounded px-1"
-                          />
-                          <input type="time" value={v.start || ""} onChange={(e) => updateVolunteer(h.id, v.id, "start", e.target.value)}
-                            className="w-[78px] shrink-0 text-slate-500 font-mono text-[10px] bg-transparent focus:bg-slate-50 rounded px-0.5" />
-                          <input type="time" value={v.end || ""} onChange={(e) => updateVolunteer(h.id, v.id, "end", e.target.value)}
-                            className="w-[78px] shrink-0 text-slate-500 font-mono text-[10px] bg-transparent focus:bg-slate-50 rounded px-0.5" />
-                          <button onClick={() => removeVolunteer(h.id, v.id)} className="text-slate-400 hover:text-rose-500 shrink-0"><X className="w-3 h-3" /></button>
-                        </div>
-                      ))}
-                      {volunteers.length === 0 && <span className="text-[11px] italic text-slate-400">none yet</span>}
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <select
-                        value={nv.name}
-                        onChange={(e) => setNewVolField(h.id, "name", e.target.value)}
-                        className="flex-1 min-w-0 text-[11px] bg-white border border-slate-200 rounded px-1.5 py-1 text-slate-700"
-                      >
-                        <option value="">Add volunteer…</option>
-                        {nameOptions.map((n) => <option key={n} value={n}>{n}</option>)}
-                      </select>
-                      <button onClick={() => submitVol(h.id)} className="text-teal-600 hover:text-teal-800 shrink-0" title="Add volunteer">
-                        <Plus className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </td>
-                  <td className="px-2 py-2 text-center align-top">
-                    <input type="checkbox" checked={!!h.metrics?.mocComplete} onChange={(e) => updateMetric(h.id, "mocComplete", e.target.checked)} className="accent-teal-500" />
-                  </td>
-                  {METRIC_FIELDS.map((f) => (
-                    <td key={f} className="px-2 py-2 text-center align-top">
+                  </div>
+                  <div className="text-[11px] text-slate-500">{fmtDate(h.date)} · {volunteers.length} of {needed} volunteers</div>
+                </div>
+                <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: sc }} />
+              </button>
+              {isOpen && (
+                <div className="px-3 py-3 bg-white border-t" style={{ borderColor: holidayBorderFor(volunteers.length, needed) }}>
+                  <div className="flex flex-wrap items-center gap-4 mb-3">
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-slate-500">Team lead:</label>
                       <input
-                        value={h.metrics?.[f] || ""}
-                        onChange={(e) => updateMetric(h.id, f, e.target.value.replace(/[^0-9]/g, ""))}
+                        value={h.teamLead || ""}
+                        onChange={(e) => updateHolidayField(h.id, "teamLead", e.target.value)}
                         placeholder="—"
-                        className="w-12 text-center text-xs bg-white border border-slate-200 rounded px-1 py-1 text-slate-700 placeholder-slate-400 font-mono"
+                        className="w-28 text-xs bg-white border border-slate-300 rounded px-2 py-1 text-slate-700"
                       />
-                    </td>
-                  ))}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-slate-500">Volunteers needed:</label>
+                      <input
+                        type="number" min={0} value={needed}
+                        onChange={(e) => updateHolidayField(h.id, "needed", Math.max(0, parseInt(e.target.value) || 0))}
+                        className="w-16 text-xs bg-white border border-slate-300 rounded px-2 py-1 text-slate-700"
+                      />
+                    </div>
+                    <label className="flex items-center gap-1.5 text-xs text-slate-600">
+                      <input type="checkbox" checked={!!h.metrics?.mocComplete} onChange={(e) => updateMetric(h.id, "mocComplete", e.target.checked)} className="accent-teal-600" />
+                      MOC complete
+                    </label>
+                  </div>
+
+                  <div className="space-y-1 mb-2">
+                    {volunteers.map((v) => (
+                      <div key={v.id} className="flex items-center gap-1.5 text-xs bg-slate-50 border border-slate-200 rounded px-2 py-1.5">
+                        <input
+                          list={`holiday-names-${h.id}`}
+                          value={v.name}
+                          onChange={(e) => updateVolunteer(h.id, v.id, "name", e.target.value)}
+                          className="flex-1 min-w-0 bg-transparent font-medium text-slate-900 focus:bg-white rounded px-1"
+                        />
+                        <input type="time" value={v.start || ""} onChange={(e) => updateVolunteer(h.id, v.id, "start", e.target.value)}
+                          className="w-[78px] shrink-0 text-slate-500 font-mono text-[10px] bg-transparent focus:bg-white rounded px-0.5" />
+                        <input type="time" value={v.end || ""} onChange={(e) => updateVolunteer(h.id, v.id, "end", e.target.value)}
+                          className="w-[78px] shrink-0 text-slate-500 font-mono text-[10px] bg-transparent focus:bg-white rounded px-0.5" />
+                        <button onClick={() => removeVolunteer(h.id, v.id)} className="text-slate-400 hover:text-rose-500 shrink-0"><X className="w-3 h-3" /></button>
+                      </div>
+                    ))}
+                    {volunteers.length === 0 && <span className="text-[11px] italic text-slate-400">Nobody signed up yet.</span>}
+                  </div>
+                  <div className="flex items-center gap-1.5 mb-3">
+                    <select
+                      value={nv.name}
+                      onChange={(e) => setNewVolField(h.id, "name", e.target.value)}
+                      className="flex-1 min-w-0 text-xs bg-white border border-slate-300 rounded px-2 py-1.5 text-slate-700"
+                    >
+                      <option value="">Add volunteer…</option>
+                      {nameOptions.map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                    <button onClick={() => submitVol(h.id)} className="px-3 py-1.5 rounded text-xs font-medium text-white flex items-center gap-1" style={{ backgroundColor: TH.teal }}>
+                      <Plus className="w-3 h-3" /> Add
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-1.5 pt-2 border-t border-slate-100">
+                    {METRIC_FIELDS.map((f) => (
+                      <div key={f}>
+                        <label className="block text-[9px] font-mono uppercase text-slate-400 mb-0.5">{f}</label>
+                        <input
+                          value={h.metrics?.[f] || ""}
+                          onChange={(e) => updateMetric(h.id, f, e.target.value.replace(/[^0-9]/g, ""))}
+                          placeholder="—"
+                          className="w-full text-center text-xs bg-white border border-slate-300 rounded px-1 py-1 text-slate-700 font-mono"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -3567,7 +3635,6 @@ export default function ManagerSchedule() {
   const [newTdDate, setNewTdDate] = useState("");
   const [newTdLabel, setNewTdLabel] = useState("Approved");
   const [showPastGrid, setShowPastGrid] = useState(false);
-  const [holidayView, setHolidayView] = useState("table"); // 'table' | 'cards'
   const [undoStack, setUndoStack] = useState([]); // snapshots of `data` from right before each change, most recent last
   const [checkingLock, setCheckingLock] = useState(true);
   const [unlocked, setUnlocked] = useState(false);
@@ -4432,39 +4499,41 @@ export default function ManagerSchedule() {
                         return (
                           <div
                             key={d}
-                            className={`relative border rounded-lg p-2 min-h-[92px] ${overlap ? "border-amber-200 bg-amber-50/50" : isPast ? "border-slate-100 bg-slate-50/50" : "border-slate-200 bg-white"}`}
+                            className={`relative border rounded-lg p-2 min-h-[92px] group/cell ${overlap ? "border-amber-200 bg-amber-50/50" : isPast ? "border-slate-100 bg-slate-50/50" : "border-slate-200 bg-white"}`}
                           >
                             <div className="flex items-center justify-between mb-1.5">
                               <span className={`text-[11px] font-mono font-semibold ${isPast ? "text-slate-400" : "text-slate-700"}`}>{fmtDate(d)}</span>
                               <button
                                 onClick={() => setCalAddFor((cur) => (cur === d ? null : d))}
-                                className="text-slate-400 hover:text-teal-700 leading-none text-sm font-bold px-1"
+                                className="text-slate-300 hover:text-teal-700 opacity-0 group-hover/cell:opacity-100 transition-opacity leading-none"
                                 title="Log time off for this day"
                               >
-                                +
+                                <Plus className="w-3.5 h-3.5" />
                               </button>
                             </div>
-                            {overlap && (
-                              <div className="flex items-center gap-1 text-[9px] text-amber-800 font-semibold mb-1">
-                                <AlertTriangle className="w-2.5 h-2.5" /> {peopleOut} out
-                              </div>
-                            )}
                             <div className="space-y-1">
                               {entries.map((entry) => {
                                 const emp = employees.find((e) => e.id === entry.empId);
                                 // The hours/whole-day-vs-specific detail lives on the linked Schedule
-                                // cell, not on the time-off entry itself — pull it in for the tooltip.
+                                // cell, not on the time-off entry itself.
                                 const linkedCell = cells[cellKey(entry.empId, entry.date)];
-                                const timeDetail = linkedCell && linkedCell.statusScope === "partial" && linkedCell.statusStart && linkedCell.statusEnd
-                                  ? `${formatRange12h(linkedCell.statusStart, linkedCell.statusEnd)}`
+                                const isPartial = linkedCell && linkedCell.statusScope === "partial" && linkedCell.statusStart && linkedCell.statusEnd;
+                                const timeDetail = isPartial
+                                  ? formatRange12h(linkedCell.statusStart, linkedCell.statusEnd)
                                   : linkedCell && linkedCell.hours
                                     ? `Whole day (${linkedCell.hours}h)`
                                     : "Whole day";
+                                const ec = timeOffEntryColor(entry.label);
                                 return (
                                   <div key={entry.id} className="relative group">
-                                    <div className="flex items-center justify-between gap-1 text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800">
-                                      <span className="truncate">{emp ? emp.name.split(" ")[0] : entry.empId}</span>
-                                      <button onClick={() => removeTimeOffDate(entry.id)} className="text-indigo-400 hover:text-rose-500 shrink-0"><X className="w-2.5 h-2.5" /></button>
+                                    <div className="flex items-center justify-between gap-1 text-[10px] px-1.5 py-0.5 rounded" style={{ backgroundColor: ec.bg, color: ec.text }}>
+                                      <span className="truncate">
+                                        {emp ? emp.name.split(" ")[0] : entry.empId}
+                                        {isPartial && <span className="opacity-70"> · {timeDetail}</span>}
+                                      </span>
+                                      <button onClick={() => removeTimeOffDate(entry.id)} className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0" style={{ color: ec.text }}>
+                                        <X className="w-2.5 h-2.5" />
+                                      </button>
                                     </div>
                                     <div className="absolute z-30 hidden group-hover:block bottom-full left-0 mb-1 whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1.5 rounded shadow-lg pointer-events-none max-w-[220px]">
                                       <div className="font-semibold">{emp ? emp.name : entry.empId} — {entry.label}</div>
@@ -4558,8 +4627,6 @@ export default function ManagerSchedule() {
           addVolunteer={addVolunteer}
           removeVolunteer={removeVolunteer}
           updateVolunteer={updateVolunteer}
-          holidayView={holidayView}
-          setHolidayView={setHolidayView}
         />
       )}
 
