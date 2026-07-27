@@ -2235,28 +2235,60 @@ function loadJsPdf() {
 
 // One page per employee — same metric bars/tags/thresholds as the rest of this tab, just laid
 // out for printing/emailing. Only includes employees who have an accepted entry for monthKey.
+// Per-metric status pill shown next to each bar on the real scorecard — e.g. "On track",
+// "Meets target", "Excellent", "Perfect", vs "Below target", "Below 50%", "Over limit",
+// "Needs work". Thresholds reuse the same constants as analyzeCaEval's bullet-point tiering,
+// just collapsed into the shorter badge text the original template actually uses.
+function scorecardBadge(metric, value) {
+  if (value == null) return null;
+  if (metric === "tickets") {
+    return value >= CA_TICKET_BENCHMARK ? { text: "On track", tone: "good" } : { text: "Below target", tone: "bad" };
+  }
+  if (metric === "availablePct") {
+    if (value >= CA_AVAIL_GOOD + 10) return { text: "On track", tone: "good" };
+    if (value >= CA_AVAIL_GOOD) return { text: "Meets target", tone: "good" };
+    return { text: `Below ${CA_AVAIL_GOOD}%`, tone: "bad" };
+  }
+  if (metric === "acw") {
+    if (value < CA_ACW_LIMIT * 0.6) return { text: "Excellent", tone: "good" };
+    if (value < CA_ACW_LIMIT) return { text: "Acceptable", tone: "warn" };
+    return { text: "Over limit", tone: "bad" };
+  }
+  if (metric === "qa") {
+    if (value === 100) return { text: "Perfect", tone: "good" };
+    if (value >= 90) return { text: "Excellent", tone: "good" };
+    if (value >= 66.7) return { text: "Acceptable", tone: "warn" };
+    return { text: "Needs work", tone: "bad" };
+  }
+  return null;
+}
+const SCORECARD_BADGE_COLORS = {
+  good: [[220, 252, 231], [0, 125, 90]],
+  warn: [[254, 249, 195], [113, 63, 18]],
+  bad: [[254, 226, 226], [127, 29, 29]],
+};
+
 async function downloadScorecardPdf(employees, qaEvals, monthKey) {
   const { jsPDF } = await loadJsPdf();
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
   const pw = doc.internal.pageSize.getWidth();
   const margin = 18;
   const now = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+  const ph = doc.internal.pageSize.getHeight();
+  const bottomLimit = ph - 22; // leave room for the footer line
 
   const numOrNull = (v) => (v === "" || v == null ? null : parseFloat(v));
   const monthEntries = employees
     .map((e) => ({ emp: e, raw: qaEvals[e.id]?.[monthKey] }))
     .filter((x) => x.raw && (x.raw.tickets != null || x.raw.availablePct != null || x.raw.acw != null || x.raw.qa != null));
+  if (!monthEntries.length) throw new Error(`No accepted entries for ${monthKeyLabel(monthKey)} yet.`);
 
-  const allTickets = monthEntries.map((x) => numOrNull(x.raw.tickets)).filter((v) => v != null);
-  const allAvail = monthEntries.map((x) => numOrNull(x.raw.availablePct)).filter((v) => v != null);
-  const allQa = monthEntries.map((x) => numOrNull(x.raw.qa)).filter((v) => v != null);
-  const avgQa = allQa.length ? allQa.reduce((a, b) => a + b, 0) / allQa.length : 0;
+  const allQaVals = monthEntries.map((x) => numOrNull(x.raw.qa)).filter((v) => v != null);
+  const avgQa = allQaVals.length ? allQaVals.reduce((a, b) => a + b, 0) / allQaVals.length : 0;
 
-  monthEntries.forEach(({ emp, raw }, idx) => {
-    if (idx > 0) doc.addPage();
-    let y = 0;
-
-    doc.setFillColor(13, 34, 51); doc.rect(0, 0, pw, 32, "F");
+  let pageNum = 0;
+  const drawTopHeader = () => {
+    doc.setFillColor(9, 26, 41); doc.rect(0, 0, pw, 32, "F");
     doc.setFillColor(0, 168, 120); doc.rect(0, 32, pw, 2.5, "F");
     doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont("helvetica", "bold");
     doc.text("Tomorrow Health", margin, 14);
@@ -2266,31 +2298,61 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
     doc.text("Generated " + now, pw - margin, 14, "right");
     doc.setTextColor(0, 168, 120); doc.setFontSize(7); doc.setFont("helvetica", "bold");
     doc.text("INTERNAL USE ONLY", pw - margin, 21, "right");
-    y = 40;
+  };
+  const drawPageFooter = (name) => {
+    doc.setDrawColor(221, 226, 232); doc.setLineWidth(0.3); doc.line(margin, ph - 14, pw - margin, ph - 14);
+    doc.setTextColor(150, 160, 170); doc.setFontSize(7); doc.setFont("helvetica", "normal");
+    doc.text(`Tomorrow Health · CA Scorecard · ${name} · ${now}`, margin, ph - 9);
+    doc.text(`Page ${pageNum}`, pw - margin, ph - 9, "right");
+  };
+  const startPersonPage = (name, continued) => {
+    doc.addPage(); pageNum++;
+    drawTopHeader();
+    let y = 40;
+    doc.setFillColor(9, 26, 41); doc.rect(0, y, pw, 16, "F");
+    doc.setFillColor(0, 168, 120); doc.rect(0, y + 16, pw, 1.5, "F");
+    doc.setTextColor(255, 255, 255); doc.setFontSize(15); doc.setFont("helvetica", "bold");
+    doc.text(name + (continued ? " — continued" : ""), margin, y + 11);
+    return y + 24;
+  };
+  const ensureRoom = (y, needed, name) => {
+    if (y + needed > bottomLimit) {
+      drawPageFooter(name);
+      return startPersonPage(name, true);
+    }
+    return y;
+  };
+  const drawBadge = (text, tone, x, y) => {
+    const [bg, fg] = SCORECARD_BADGE_COLORS[tone];
+    const bw = doc.getTextWidth(text) + 7;
+    doc.setFillColor(...bg); doc.roundedRect(x - bw, y - 4.3, bw, 5.8, 1.2, 1.2, "F");
+    doc.setTextColor(...fg); doc.setFontSize(7); doc.setFont("helvetica", "bold");
+    doc.text(text, x - bw + 3.5, y);
+    return bw;
+  };
 
+  monthEntries.forEach(({ emp, raw }, idx) => {
+    pageNum++;
+    if (idx > 0) doc.addPage();
+    drawTopHeader();
+    let y = 40;
     doc.setFillColor(9, 26, 41); doc.rect(0, y, pw, 16, "F");
     doc.setFillColor(0, 168, 120); doc.rect(0, y + 16, pw, 1.5, "F");
     doc.setTextColor(255, 255, 255); doc.setFontSize(15); doc.setFont("helvetica", "bold");
     doc.text(emp.name, margin, y + 11);
-    doc.setFontSize(8); doc.setFont("helvetica", "normal"); doc.setTextColor(200, 230, 220);
-    doc.text(monthKeyLabel(monthKey), pw - margin, y + 11, "right");
-    y += 24;
+    y += 26;
 
     const ev = { tickets: numOrNull(raw.tickets), availablePct: numOrNull(raw.availablePct), acw: numOrNull(raw.acw), qa: numOrNull(raw.qa) };
-    const overall = qaOverallScore(ev, allTickets, allAvail, allQa);
-    const label = qaOverallLabel(overall);
-    const labelRgb = { strong: [0, 125, 90], good: [30, 58, 138], average: [113, 63, 18], needs: [127, 29, 29] }[label.tone];
-    const labelBg = { strong: [220, 252, 231], good: [219, 234, 254], average: [254, 249, 195], needs: [254, 226, 226] }[label.tone];
-    doc.setFillColor(...labelBg); doc.roundedRect(margin, y, doc.getTextWidth(label.text) + 10, 7, 1.5, 1.5, "F");
-    doc.setTextColor(...labelRgb); doc.setFontSize(8); doc.setFont("helvetica", "bold");
-    doc.text(label.text, margin + 5, y + 4.8);
-    y += 13;
 
-    const barW = 90, barX = margin + 42, valX = barX + barW + 4;
+    doc.setTextColor(140, 155, 170); doc.setFontSize(7); doc.setFont("helvetica", "bold");
+    doc.text("PERFORMANCE SCORES", margin, y);
+    y += 7;
+
+    const barW = 78, barX = margin + 42, valX = barX + barW + 4, badgeRightX = pw - margin;
     const metricDefs = [
-      { key: "tickets", label: "Tickets / available hr", sub: `Benchmark: ${CA_TICKET_BENCHMARK}`, rgb: [0, 168, 120], fmt: (v) => v.toFixed(2), maxRef: Math.max(...(allTickets.length ? allTickets : [1]), CA_TICKET_BENCHMARK) },
+      { key: "tickets", label: "Tickets / available hr", sub: `Benchmark: ${CA_TICKET_BENCHMARK.toFixed(2)}`, rgb: [0, 168, 120], fmt: (v) => v.toFixed(2), maxRef: Math.max(ev.tickets || 0, CA_TICKET_BENCHMARK) * 1.05 },
       { key: "availablePct", label: "Available %", sub: `Target: >${CA_AVAIL_GOOD}%`, rgb: [242, 108, 80], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
-      { key: "acw", label: "After Call Work %", sub: `Limit: <${CA_ACW_LIMIT}%`, rgb: ev.acw != null && ev.acw >= CA_ACW_LIMIT ? [200, 43, 43] : [59, 130, 246], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
+      { key: "acw", label: "After Call Work %", sub: `Limit: <${Math.round(CA_ACW_LIMIT)}%`, rgb: [59, 130, 246], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
       { key: "qa", label: "QA score", sub: "Yes=100% · Partial=50% · No=0%", rgb: [124, 58, 237], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
     ];
     metricDefs.forEach((m) => {
@@ -2305,23 +2367,92 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
       doc.setFillColor(...m.rgb); if (fillW > 0.5) doc.roundedRect(barX, y, fillW, 5.5, 1, 1, "F");
       doc.setTextColor(13, 34, 51); doc.setFontSize(9.5); doc.setFont("helvetica", "bold");
       doc.text(m.fmt(val), valX, y + 4.5);
+      const badge = scorecardBadge(m.key, val);
+      if (badge) drawBadge(badge.text, badge.tone, badgeRightX, y + 4.2);
       y += 13;
     });
+    y += 3;
 
-    y += 2;
+    // TIME IN STATUS (left) + QA OVERVIEW (right), side by side
+    const colW = (pw - margin * 2 - 6) / 2, rightX = margin + colW + 6;
+    doc.setFillColor(240, 250, 246); doc.rect(margin, y, colW, 6, "F");
+    doc.setFillColor(240, 250, 246); doc.rect(rightX, y, colW, 6, "F");
+    doc.setTextColor(0, 125, 90); doc.setFontSize(6.8); doc.setFont("helvetica", "bold");
+    doc.text("TIME IN STATUS", margin + 2, y + 4);
+    doc.text("QA OVERVIEW", rightX + 2, y + 4);
+    y += 10;
+    const otherPct = (ev.availablePct != null && ev.acw != null) ? Math.max(0, 100 - ev.availablePct - ev.acw) : null;
+    const timeRows = [["Available", ev.availablePct], ["After Call Work", ev.acw], ["Interaction / Other", otherPct]].filter(([, v]) => v != null);
+    let ty = y;
+    timeRows.forEach(([label, val]) => {
+      doc.setTextColor(61, 81, 102); doc.setFontSize(7.5); doc.setFont("helvetica", "normal");
+      doc.text(label, margin + 2, ty);
+      doc.setTextColor(0, 168, 120); doc.setFont("helvetica", "bold");
+      doc.text(val.toFixed(1) + "%", margin + colW - 2, ty, "right");
+      ty += 6;
+    });
+    if (ev.qa != null) {
+      const n = (raw.qaTickets || []).length;
+      doc.setTextColor(0, 168, 120); doc.setFontSize(17); doc.setFont("helvetica", "bold");
+      doc.text(ev.qa.toFixed(1) + "%", rightX + 2, y + 8);
+      doc.setTextColor(140, 155, 170); doc.setFontSize(7); doc.setFont("helvetica", "normal");
+      doc.text(`QA score${n ? ` | ${n} ticket${n === 1 ? "" : "s"} reviewed` : ""}`, rightX + 2, y + 14);
+    }
+    y = Math.max(ty, y + 16) + 5;
     doc.setDrawColor(221, 226, 232); doc.setLineWidth(0.3); doc.line(margin, y, pw - margin, y);
     y += 7;
 
+    // QA TICKET DETAIL — full per-ticket breakdown, exactly as captured from the QA CSV
+    if (raw.qaTickets && raw.qaTickets.length) {
+      y = ensureRoom(y, 10, emp.name);
+      doc.setTextColor(140, 155, 170); doc.setFontSize(7); doc.setFont("helvetica", "bold");
+      doc.text("QA TICKET DETAIL", margin, y);
+      y += 6;
+      raw.qaTickets.forEach((t, i) => {
+        const pct = Math.round((t.pts || 0) * 100);
+        const tone = t.pts === 1 ? "good" : t.pts === 0 ? "bad" : "warn";
+        const noteLines = t.coachingNote ? doc.splitTextToSize(t.coachingNote, pw - margin * 2 - 4) : [];
+        const rowH = 7 + noteLines.length * 3.5 + 5;
+        y = ensureRoom(y, rowH, emp.name);
+        doc.setTextColor(13, 34, 51); doc.setFontSize(8); doc.setFont("helvetica", "bold");
+        doc.text(`Ticket ${i + 1}`, margin, y);
+        doc.setFont("helvetica", "normal"); doc.setTextColor(130, 140, 150);
+        doc.text(t.date || "", margin + 20, y);
+        doc.setTextColor(0, 125, 90); doc.setFont("helvetica", "bold");
+        doc.text(t.friendlyId || "", margin + 42, y);
+        doc.setTextColor(61, 81, 102); doc.setFont("helvetica", "normal"); doc.setFontSize(7.5);
+        doc.text(t.resultRaw || "", pw - margin - 18, y, "right");
+        drawBadge(pct + "%", tone, pw - margin, y);
+        y += 5;
+        if (noteLines.length) {
+          doc.setDrawColor(0, 168, 120); doc.setLineWidth(0.7);
+          doc.line(margin, y - 2.8, margin, y - 2.8 + noteLines.length * 3.5);
+          doc.setTextColor(80, 90, 100); doc.setFontSize(7); doc.setFont("helvetica", "normal");
+          doc.text(noteLines, margin + 3, y);
+          y += noteLines.length * 3.5;
+        }
+        y += 5;
+      });
+      y += 1;
+    }
+
+    // ANALYSIS
     const { highlights, improvements, coaching } = analyzeCaEval(ev, avgQa);
+    y = ensureRoom(y, 10, emp.name);
+    doc.setTextColor(140, 155, 170); doc.setFontSize(7); doc.setFont("helvetica", "bold");
+    doc.text("ANALYSIS", margin, y);
+    y += 6;
     const writeSection = (title, items, rgb) => {
       if (!items.length) return;
+      y = ensureRoom(y, 8, emp.name);
       doc.setTextColor(...rgb); doc.setFontSize(8); doc.setFont("helvetica", "bold");
-      doc.text(title.toUpperCase(), margin, y);
+      doc.text(title, margin, y);
       y += 5;
       doc.setTextColor(61, 81, 102); doc.setFontSize(7.5); doc.setFont("helvetica", "normal");
       items.forEach((h) => {
-        const lines = doc.splitTextToSize("• " + h, pw - margin * 2 - 3);
-        doc.text(lines, margin + 2, y);
+        const lines = doc.splitTextToSize(h, pw - margin * 2 - 3);
+        y = ensureRoom(y, lines.length * 3.6 + 2, emp.name);
+        doc.text(lines, margin, y);
         y += lines.length * 3.6 + 2;
       });
       y += 3;
@@ -2330,18 +2461,47 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
     writeSection("Areas for improvement", improvements, [180, 30, 30]);
     writeSection("Coaching notes", coaching, [29, 78, 216]);
 
+    // PERFORMANCE METRICS — from the Historical metrics CSV, if uploaded
+    if (raw.hist) {
+      y = ensureRoom(y, 20, emp.name);
+      doc.setDrawColor(221, 226, 232); doc.line(margin, y, pw - margin, y);
+      y += 6;
+      doc.setTextColor(140, 155, 170); doc.setFontSize(7); doc.setFont("helvetica", "bold");
+      doc.text("PERFORMANCE METRICS", margin, y);
+      y += 6;
+      const metrics = [
+        ["AWS Answer Rate", raw.hist.answerRate], ["Inbound Calls", raw.hist.inbound],
+        ["Outbound Calls", raw.hist.outbound], ["Times Placed on Hold", raw.hist.onHold],
+        ["Avg Handle Time", raw.hist.avgHandleTime != null ? scorecardFmtSec(raw.hist.avgHandleTime) : null], ["Contacts Missed", raw.hist.contactsMissed],
+      ].filter(([, v]) => v != null && v !== "");
+      const mColW = (pw - margin * 2) / 2;
+      metrics.forEach(([label, val], i) => {
+        const col = i % 2, row = Math.floor(i / 2);
+        const mx = margin + col * mColW, my = y + row * 6;
+        doc.setTextColor(100, 110, 120); doc.setFontSize(7.5); doc.setFont("helvetica", "normal");
+        doc.text(label, mx, my);
+        doc.setTextColor(13, 34, 51); doc.setFont("helvetica", "bold");
+        doc.text(String(val), mx + mColW - 4, my, "right");
+      });
+      y += Math.ceil(metrics.length / 2) * 6;
+    }
+
     if (raw.notes) {
+      y = ensureRoom(y, 15, emp.name);
       doc.setDrawColor(221, 226, 232); doc.line(margin, y, pw - margin, y);
       y += 6;
       doc.setTextColor(140, 155, 170); doc.setFontSize(7); doc.setFont("helvetica", "bold");
       doc.text("MANAGER NOTES", margin, y);
       y += 5;
       doc.setTextColor(61, 81, 102); doc.setFontSize(7.5); doc.setFont("helvetica", "normal");
-      doc.text(doc.splitTextToSize(raw.notes, pw - margin * 2), margin, y);
+      const noteLines = doc.splitTextToSize(raw.notes, pw - margin * 2);
+      y = ensureRoom(y, noteLines.length * 3.6, emp.name);
+      doc.text(noteLines, margin, y);
     }
+
+    drawPageFooter(emp.name);
   });
 
-  if (!monthEntries.length) throw new Error(`No accepted entries for ${monthKeyLabel(monthKey)} yet.`);
   doc.save(`TH_CA_Scorecard_${monthKey}.pdf`);
 }
 
@@ -2431,6 +2591,24 @@ function scorecardFuzzyMatch(name, keys) {
   if (keys.includes(norm)) return norm;
   const startMatch = keys.find((k) => k.startsWith(norm) || norm.startsWith(k));
   if (startMatch) return startMatch;
+
+  // Nicknames/short first names (e.g. "Lori" for "Lorraine") don't pass a tight Levenshtein
+  // threshold on the full name, but the last name alone is a strong, low-risk signal — if
+  // exactly one roster person shares it, that's almost certainly the same person regardless
+  // of how different the first name looks. Requires both sides to actually have 2+ words, so
+  // a stray single-word CSV entry can't accidentally match on a last-name coincidence.
+  const words = norm.split(" ");
+  if (words.length >= 2) {
+    const lastWord = words[words.length - 1];
+    if (lastWord.length >= 3) {
+      const lastNameMatches = keys.filter((k) => {
+        const kWords = k.split(" ");
+        return kWords.length >= 2 && kWords[kWords.length - 1] === lastWord;
+      });
+      if (lastNameMatches.length === 1) return lastNameMatches[0];
+    }
+  }
+
   let best = null, bestDist = Infinity;
   for (const k of keys) {
     const d = scorecardLevenshtein(norm, k);
@@ -2516,7 +2694,16 @@ function matchScorecardCSVs({ ticketsRows, productivityRows, qaRows, histRows },
     }
   }
 
-  return { results, unmatched: [...new Set(unmatched)] };
+  // Different source CSVs capitalize names differently — dedupe case-insensitively so the same
+  // unmatched person doesn't show up twice (e.g. "Kristin Mobley" and "kristin mobley").
+  const seenLower = new Set();
+  const dedupedUnmatched = [];
+  unmatched.forEach((name) => {
+    const key = name.toLowerCase();
+    if (!seenLower.has(key)) { seenLower.add(key); dedupedUnmatched.push(name); }
+  });
+
+  return { results, unmatched: dedupedUnmatched };
 }
 
 function PtoEvalTab({ employees, timeOff, notes, updateNote, updateTimeOff }) {
@@ -2703,8 +2890,7 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
       if (vals.qa != null) patch.qa = vals.qa;
       if (vals.hist) patch.hist = vals.hist;
       if (vals.qaTickets && vals.qaTickets.length) {
-        const coachNotes = vals.qaTickets.map((t) => t.coachingNote).filter(Boolean);
-        if (coachNotes.length) patch.qaTicketNotes = coachNotes;
+        patch.qaTickets = vals.qaTickets;
       }
       patches[empId] = patch;
       included[empId] = true;
@@ -2727,6 +2913,10 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
     if (Object.keys(patches).length) updateQaEvalBatch(selectedMonth, patches);
     setGenResult({ matched: matchedNames });
     setPreview(null);
+    // Saved for good at this point — reset the upload cards so it's visually clear there's
+    // nothing left to do, rather than leaving old file names sitting there looking unfinished.
+    setCsvFiles({ tickets: null, productivity: null, qa: null, hist: null });
+    setCsvRows({ tickets: null, productivity: null, qa: null, hist: null });
   };
 
   const discardPreview = () => setPreview(null);
@@ -2868,7 +3058,7 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
   );
 }
 
-function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee }) {
+function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab }) {
   const numOrNull = (v) => (v === "" || v == null ? null : parseFloat(v));
   const avg = (arr) => (arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length) : null);
 
@@ -2913,7 +3103,7 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee }) {
 
   return (
     <div className="p-4 sm:p-6">
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex items-center gap-2 mb-1 flex-wrap">
         <button onClick={() => setSelectedMonth((m) => shiftMonthKey(m, -1))} className="w-7 h-7 rounded border border-slate-300 text-slate-500 hover:border-slate-400 flex items-center justify-center">‹</button>
         <span className="text-sm font-semibold px-3 py-1 rounded-full" style={{ backgroundColor: TH.navy, color: "#fff" }}>{monthKeyLabel(selectedMonth)}</span>
         <button onClick={() => setSelectedMonth((m) => shiftMonthKey(m, 1))} className="w-7 h-7 rounded border border-slate-300 text-slate-500 hover:border-slate-400 flex items-center justify-center">›</button>
@@ -2932,6 +3122,13 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee }) {
           </select>
         )}
       </div>
+      <p className="text-[11px] text-slate-400 mb-4">
+        This tab is for reviewing scores, notes, and history —{" "}
+        <button onClick={() => setTab && setTab("scorecard")} className="text-teal-700 hover:text-teal-900 underline font-medium">
+          uploads happen on CA Scorecard
+        </button>
+        , for any month (use its ‹ › arrows to reach a past one).
+      </p>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
         <div className="rounded-lg p-3" style={{ backgroundColor: TH.navy }}>
@@ -3097,14 +3294,26 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee }) {
                     </div>
                   )}
 
-                  {raw.qaTicketNotes && raw.qaTicketNotes.length > 0 && (
+                  {raw.qaTickets && raw.qaTickets.length > 0 && (
                     <div className="mb-3">
-                      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1">From the QA CSV (per-ticket coaching notes)</div>
-                      <ul className="space-y-1">
-                        {raw.qaTicketNotes.map((n, i) => (
-                          <li key={i} className="text-xs text-slate-500 italic flex gap-1.5"><span className="mt-0.5">•</span>{n}</li>
-                        ))}
-                      </ul>
+                      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1.5">QA ticket detail</div>
+                      <div className="space-y-2">
+                        {raw.qaTickets.map((t, i) => {
+                          const pct = Math.round(t.pts * 100);
+                          const vTone = t.pts === 1 ? "bg-teal-50 text-teal-800" : t.pts === 0 ? "bg-rose-50 text-rose-800" : "bg-amber-50 text-amber-800";
+                          return (
+                            <div key={i} className="border border-slate-100 rounded p-2">
+                              <div className="flex items-center gap-2 text-[11px] mb-1">
+                                <span className="font-semibold text-slate-700">Ticket {i + 1}</span>
+                                <span className="text-slate-400 font-mono">{t.date}</span>
+                                {t.friendlyId && <span className="text-teal-700 font-mono">{t.friendlyId}</span>}
+                                <span className={`ml-auto px-1.5 py-0.5 rounded font-semibold ${vTone}`}>{t.resultRaw} · {pct}%</span>
+                              </div>
+                              {t.coachingNote && <p className="text-xs text-slate-500 italic">{t.coachingNote}</p>}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
 
@@ -4328,6 +4537,7 @@ export default function ManagerSchedule() {
           qaEvals={data.qaEvals || {}}
           updateQaEval={updateQaEval}
           updateEmployee={updateEmployee}
+          setTab={setTab}
         />
       )}
 
