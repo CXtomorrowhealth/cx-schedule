@@ -170,7 +170,6 @@ function greeting() {
 // there's no cross-artifact storage question left: it's all one published page.
 function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, offline }) {
   const me = employees.find((e) => e.id === meId);
-  const [selectedDate, setSelectedDate] = useState(() => dates.find((d) => isToday(d)) || dates[0]);
   if (!me) {
     // Their session pointed at an id that no longer exists on the roster (removed employee).
     return (
@@ -184,7 +183,7 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
     );
   }
 
-  // Shared per-day computation, used by both the week-strip tiles and the big detail panel below.
+  // Shared per-day computation for each agenda row.
   const dayInfo = (d) => {
     const c = cells[cellKey(me.id, d)] || emptyCell();
     const today = isToday(d);
@@ -203,9 +202,6 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
     const hideTasksRow = isNotScheduled || (primaryBlock && !primaryBlock.start);
     return { c, today, weekend, isEmpty, showAsWeekend, shiftStart, shiftEnd, hasTasks, isRegularWorkday, blocks, isNotScheduled, primaryBlock, st, hideTasksRow };
   };
-
-  const sel = dayInfo(selectedDate);
-  const selDateObj = new Date(selectedDate + "T00:00:00");
 
   return (
     <div className="min-h-screen bg-white" style={{ color: TH.text, fontFamily: "'Inter', sans-serif" }}>
@@ -235,72 +231,53 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
         <div className="h-[3px]" style={{ background: `linear-gradient(90deg, ${TH.teal}, ${TH.blue})` }} />
       </div>
 
-      <div className="px-4 sm:px-6 py-6 max-w-5xl mx-auto">
-        {/* Big week strip — every date gets a full tile, not a compact chip */}
-        <div className="grid grid-cols-7 gap-2 sm:gap-3 mb-6">
+      <div className="px-4 sm:px-6 py-6 max-w-2xl mx-auto">
+        <div className="rounded-2xl border-2 border-slate-200 divide-y divide-slate-100 overflow-hidden">
           {dates.map((d) => {
             const info = dayInfo(d);
             const dateObj = new Date(d + "T00:00:00");
-            const isSelected = d === selectedDate;
-            const chipColor = info.primaryBlock ? (STATUS_SOLID_HEX[info.primaryBlock.type] || "#94a3b8") : TH.teal;
+            const allTasks = info.hasTasks ? sortTasksForDisplay(info.c.tasks) : [];
             return (
-              <button
-                key={d}
-                onClick={() => setSelectedDate(d)}
-                className={`rounded-xl border-2 p-2.5 sm:p-4 flex flex-col items-center justify-center gap-1 min-h-[96px] sm:min-h-[128px] transition-colors ${
-                  isSelected ? "border-teal-500 bg-teal-50" : info.showAsWeekend ? "border-dashed border-slate-200 hover:border-slate-300" : "border-slate-200 hover:border-slate-300"
-                }`}
-              >
-                <span className="text-[10px] font-mono uppercase text-slate-400">{dateObj.toLocaleDateString("en-US", { weekday: "short" })}</span>
-                <span className="text-xl sm:text-2xl font-bold text-slate-900">{dateObj.getDate()}</span>
-                {info.today && <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-teal-800 text-teal-200">TODAY</span>}
-                {!info.showAsWeekend && (
-                  <span className="text-[9px] sm:text-[10px] font-semibold px-2 py-0.5 rounded-full text-white whitespace-nowrap" style={{ backgroundColor: info.primaryBlock ? chipColor : TH.teal }}>
-                    {info.isNotScheduled ? "Off" : info.primaryBlock ? blockLabel(info.primaryBlock.type) : (info.blocks.length || info.hasTasks) ? "Working" : "—"}
-                  </span>
-                )}
-                {info.showAsWeekend && <span className="text-[9px] sm:text-[10px] text-slate-400">Weekend</span>}
-              </button>
+              <div key={d} className={`flex items-start gap-4 p-4 ${info.today ? "bg-teal-50" : info.showAsWeekend ? "bg-slate-50/60" : ""}`}>
+                <div className="w-16 shrink-0 pt-0.5 text-center">
+                  <div className="text-[10px] font-mono uppercase text-slate-400">{dateObj.toLocaleDateString("en-US", { weekday: "short" })}</div>
+                  <div className="text-lg font-bold text-slate-900">{dateObj.getDate()}</div>
+                  {info.today && <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-teal-800 text-teal-200 mt-0.5 inline-block">TODAY</span>}
+                </div>
+                <div className="flex-1 min-w-0 pt-0.5">
+                  {info.isNotScheduled ? (
+                    <span className="text-sm text-slate-400 italic">Not scheduled</span>
+                  ) : info.primaryBlock && info.primaryBlock.start === "" ? (
+                    <span className={`inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border ${info.st.pill}`}>{blockLabel(info.primaryBlock.type)}</span>
+                  ) : info.blocks.length > 0 ? (
+                    <div className="space-y-1">
+                      {info.blocks.filter((b) => b.start && b.end).map((b, i) => (
+                        <div key={i} className="text-sm font-medium text-slate-800">
+                          {b.type === "Working" ? formatRange12h(b.start, b.end) : `${blockLabel(b.type)} · ${formatRange12h(b.start, b.end)}`}
+                        </div>
+                      ))}
+                    </div>
+                  ) : info.isRegularWorkday && (me.shiftStart || me.shiftEnd) ? (
+                    <span className="text-sm text-slate-400">{formatRange12h(info.shiftStart, info.shiftEnd)} (usual)</span>
+                  ) : info.showAsWeekend ? (
+                    <span className="text-sm text-slate-400 italic">Not a scheduled workday</span>
+                  ) : (
+                    <span className="text-sm text-slate-400 italic">Not set yet</span>
+                  )}
+
+                  {!info.hideTasksRow && allTasks.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {allTasks.map((t) => (
+                        <span key={t.id} className={`text-[11px] px-2 py-0.5 rounded-full border whitespace-nowrap ${taskColor(t.name)}`}>
+                          {t.name}{t.payer ? ` (${t.payer})` : ""}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""}{t.scope === "partial" && t.start && t.end ? ` · ${formatRange12h(t.start, t.end)}` : ""}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
             );
           })}
-        </div>
-
-        {/* Big detail panel for whichever day is selected above */}
-        <div className={`rounded-2xl border-2 px-5 sm:px-8 py-6 sm:py-8 ${sel.today ? "border-teal-400 bg-teal-50" : sel.showAsWeekend ? "border-dashed border-slate-200 bg-white" : "border-slate-200 bg-slate-50"}`}>
-          <div className="flex items-center gap-2.5 mb-4">
-            <span className="text-lg sm:text-xl font-bold text-slate-900">
-              {selDateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
-            </span>
-            {sel.today && <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-teal-800 text-teal-200">TODAY</span>}
-          </div>
-
-          {!sel.showAsWeekend && (
-            <div className="flex justify-between text-[10px] font-mono text-slate-400 mb-2 px-0.5">
-              {HOUR_MARKS.map((h) => <span key={h}>{fmtHourMark(h)}</span>)}
-            </div>
-          )}
-
-          {sel.blocks.length > 0 && !sel.isNotScheduled ? (
-            <DayBlocksBar blocks={sel.blocks} workingColor={TH.teal} height="h-9 sm:h-11" />
-          ) : sel.isNotScheduled ? (
-            <div className="text-sm text-slate-400 italic py-2">Not scheduled</div>
-          ) : sel.isRegularWorkday && (me.shiftStart || me.shiftEnd) ? (
-            <TimelineBar label={`${formatRange12h(sel.shiftStart, sel.shiftEnd)} (usual)`} start={sel.shiftStart} end={sel.shiftEnd} color="#cbd5e1" />
-          ) : sel.showAsWeekend ? (
-            <div className="text-sm text-slate-400 italic py-2">Not a scheduled workday</div>
-          ) : (
-            <div className="text-sm text-slate-400 italic py-2">Your schedule has not been set yet</div>
-          )}
-
-          {!sel.hideTasksRow && sel.hasTasks && (
-            <div className="flex flex-wrap justify-center gap-2 mt-4">
-              {sortTasksForDisplay(sel.c.tasks).map((t) => (
-                <span key={t.id} className={`text-xs px-2.5 py-1 rounded-full border ${taskColor(t.name)}`}>
-                  {t.name}{t.payer ? ` (${t.payer})` : ""}{t.scope === "partial" && t.start && t.end ? ` · ${formatRange12h(t.start, t.end)}` : ""}
-                </span>
-              ))}
-            </div>
-          )}
         </div>
       </div>
     </div>
@@ -1564,34 +1541,18 @@ function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, 
                   )}
                   {!hideTasksRow && hasTasks && (() => {
                     const allTasks = sortTasksForDisplay(c.tasks);
-                    const timedTasks = allTasks.filter((t) => t.scope === "partial" && t.start && t.end);
-                    const alldayTasks = allTasks.filter((t) => !(t.scope === "partial" && t.start && t.end));
+                    // Align with wherever the day's earliest block actually starts, same axis the
+                    // bars use — not the container edge, and not centered.
+                    const blockStarts = blocks.map((b) => b.start).filter(Boolean).map(toMinutes);
+                    const rowLeftPct = blockStarts.length ? pctOfDay(Math.min(...blockStarts)) : 0;
                     return (
-                      <>
-                        {alldayTasks.length > 0 && (
-                          <div className="flex flex-wrap justify-center gap-1 mt-1.5">
-                            {alldayTasks.map((t) => (
-                              <span key={t.id} className={`text-[10px] px-1.5 py-0.5 rounded border ${taskColor(t.name)}`}>
-                                {t.name}{t.payer ? ` (${t.payer})` : ""}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {timedTasks.length > 0 && (
-                          <div className="relative h-5 mt-1.5">
-                            {timedTasks.map((t) => (
-                              <span
-                                key={t.id}
-                                style={{ position: "absolute", left: `${pctOfDay(toMinutes(t.start))}%` }}
-                                className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${taskColor(t.name)}`}
-                                title={`${t.name}${t.coveringFor ? ` · covering ${t.coveringFor}` : ""} · ${formatRange12h(t.start, t.end)}`}
-                              >
-                                {t.name}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""} · {formatRange12h(t.start, t.end)}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </>
+                      <div className="flex flex-wrap gap-1 mt-1.5" style={{ marginLeft: `${rowLeftPct}%` }}>
+                        {allTasks.map((t) => (
+                          <span key={t.id} className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${taskColor(t.name)}`}>
+                            {t.name}{t.payer ? ` (${t.payer})` : ""}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""}{t.scope === "partial" && t.start && t.end ? ` · ${formatRange12h(t.start, t.end)}` : ""}
+                          </span>
+                        ))}
+                      </div>
                     );
                   })()}
                 </div>
@@ -5024,6 +4985,8 @@ export default function ManagerSchedule() {
                 if (!archivedCell) return null;
                 const blocks = getCellBlocks(archivedCell, emp.shiftStart, emp.shiftEnd);
                 const isNotScheduled = blocks.length === 1 && blocks[0].type === "NotScheduled";
+                const archivedPrimaryBlock = blocks.find((b) => b.type !== "Working") || null;
+                const archivedHideTasksRow = isNotScheduled || (archivedPrimaryBlock && !archivedPrimaryBlock.start);
                 return (
                   <div key={emp.id} className="border border-slate-100 rounded-lg p-2.5">
                     <div className="text-xs font-medium text-slate-900 mb-1.5">{emp.name}</div>
@@ -5032,7 +4995,7 @@ export default function ManagerSchedule() {
                     ) : (
                       <DayBlocksBar blocks={blocks} workingColor={teamColor(emp.team).accent} height="h-6" />
                     )}
-                    {archivedCell.tasks && archivedCell.tasks.length > 0 && (
+                    {!archivedHideTasksRow && archivedCell.tasks && archivedCell.tasks.length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-1.5">
                         {sortTasksForDisplay(archivedCell.tasks).map((t) => (
                           <span key={t.id} className={`text-[10px] px-1.5 py-0.5 rounded border ${taskColor(t.name)}`}>{t.name}</span>
