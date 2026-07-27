@@ -821,6 +821,25 @@ function hoursBetween(start, end) {
   return String(Math.round(diff * 4) / 4);
 }
 
+// The inverse of TIMEOFF_LABEL_TO_STATUS — what to suggest logging on the Time Off tab when a
+// non-Working block gets set on the Schedule tab. If the block only covers part of the person's
+// usual shift, the day-fraction gets folded into the label (matching how it's written elsewhere,
+// e.g. "Sick 0.25 day") instead of just suggesting a generic whole-day entry.
+const STATUS_TO_TIMEOFF_LABEL = { OOO: "Approved", Sick: "Sick", Holiday: "Holiday", FloatingHoliday: "Floating Holiday", LOA: "LoA" };
+function suggestedTimeOffLabel(block, emp) {
+  const base = STATUS_TO_TIMEOFF_LABEL[block.type];
+  if (!base) return null;
+  if (block.start && block.end) {
+    const missed = parseFloat(hoursBetween(block.start, block.end)) || 0;
+    const shiftHours = parseFloat(hoursBetween(emp?.shiftStart || "09:00", emp?.shiftEnd || "17:00")) || 0;
+    if (shiftHours > 0 && missed > 0 && missed < shiftHours) {
+      const fraction = Math.round((missed / shiftHours) * 4) / 4;
+      if (fraction > 0 && fraction < 1) return `${base} ${fraction} day`;
+    }
+  }
+  return base;
+}
+
 // Defends against older/partial data shapes (e.g. tasks stored as a comma string)
 // so the board never breaks on data saved by a previous version of this artifact.
 function normalizeCell(c) {
@@ -918,6 +937,8 @@ function deriveLegacyFieldsFromBlocks(blocks) {
     statusEnd: isPartial ? primary.end : "",
     shiftStart, shiftEnd, hours: "",
     coveredBy: primary.coveredBy || "",
+    coveredByStart: primary.coveredByStart || "",
+    coveredByEnd: primary.coveredByEnd || "",
   };
 }
 
@@ -4006,6 +4027,7 @@ export default function ManagerSchedule() {
   const [showCoverageSettings, setShowCoverageSettings] = useState(false);
   const [coverageGapPicker, setCoverageGapPicker] = useState(null); // `${ruleId}::${date}` currently open, if any
   const [copyToDaysOpen, setCopyToDaysOpen] = useState(false);
+  const [tdSuggestComment, setTdSuggestComment] = useState({}); // blockId -> comment text for the "Add to Time Off" suggestion
   const [logTimeOff, setLogTimeOff] = useState(null); // empId
   const [logPickerEmp, setLogPickerEmp] = useState("");
   const [logDate, setLogDate] = useState("");
@@ -4728,6 +4750,17 @@ export default function ManagerSchedule() {
     persist({ ...data, timeOffDates: (data.timeOffDates || []).filter((e) => e.id !== entryId), cells: nextCells, updatedAt: Date.now() });
   };
 
+  // One-click bridge from the Schedule tab to the Time Off tab: log a block set here as a
+  // matching Time Off entry, so the two don't quietly drift out of sync.
+  const addSuggestedTimeOff = (block, comment) => {
+    const label = suggestedTimeOffLabel(block, editEmp);
+    if (!label) return;
+    const entry = { id: `td${Date.now()}`, empId: editing.empId, date: editing.date, label };
+    if (comment && comment.trim()) entry.comment = comment.trim();
+    persist({ ...data, timeOffDates: [...(data.timeOffDates || []), entry], updatedAt: Date.now() });
+    setTdSuggestComment((p) => { const next = { ...p }; delete next[block.id]; return next; });
+  };
+
   const submitLogTimeOff = () => {
     if (!logTimeOff || !logDate) return;
     let next = addDateTo(data, logDate);
@@ -4738,14 +4771,21 @@ export default function ManagerSchedule() {
     // a legacy-status cell's single block always derives to, so both entry points converge on
     // the same coverage task/block if this same day later gets opened in the block editor too.
     const prevCell = next.cells[key];
-    const oldBlocks = prevCell?.coveredBy ? [{ id: "b0", type: prevCell.status, coveredBy: prevCell.coveredBy, start: prevCell.statusStart || "", end: prevCell.statusEnd || "" }] : [];
-    const newBlocksForSync = [{ id: "b0", type: logType, coveredBy: logCoveredBy, start: logScope === "partial" ? logStart : "", end: logScope === "partial" ? logEnd : "" }];
+    const oldBlocks = prevCell?.coveredBy ? [{ id: "b0", type: prevCell.status, coveredBy: prevCell.coveredBy, coveredByStart: prevCell.coveredByStart || "", coveredByEnd: prevCell.coveredByEnd || "", start: prevCell.statusStart || "", end: prevCell.statusEnd || "" }] : [];
+    const sameCoveredBy = !!(prevCell?.coveredBy && prevCell.coveredBy === logCoveredBy);
+    const newBlocksForSync = [{
+      id: "b0", type: logType, coveredBy: logCoveredBy,
+      coveredByStart: sameCoveredBy ? (prevCell.coveredByStart || "") : "",
+      coveredByEnd: sameCoveredBy ? (prevCell.coveredByEnd || "") : "",
+      start: logScope === "partial" ? logStart : "", end: logScope === "partial" ? logEnd : "",
+    }];
     const synced = syncCoverage(logTimeOff, logDate, oldBlocks, newBlocksForSync);
     let nextCells = applyCoverageSync(next.cells, logDate, synced);
     nextCells[key] = {
       tasks: [], status: logType,
       statusScope: logScope, statusStart: logScope === "partial" ? logStart : "", statusEnd: logScope === "partial" ? logEnd : "",
       shiftStart: "", shiftEnd: "", hours, coveredBy: logCoveredBy,
+      coveredByStart: newBlocksForSync[0].coveredByStart, coveredByEnd: newBlocksForSync[0].coveredByEnd,
     };
     next = { ...next, cells: nextCells, updatedAt: Date.now() };
 
@@ -5476,6 +5516,32 @@ export default function ManagerSchedule() {
                                   )}
                                 </div>
                               )}
+                              {b.type !== "Working" && b.type !== "NotScheduled" && !(data.timeOffDates || []).some((td) => td.empId === editing.empId && td.date === editing.date) && (() => {
+                                const suggested = suggestedTimeOffLabel(b, editEmp);
+                                if (!suggested) return null;
+                                const defaultComment = (b.start && b.end) ? formatRange12h(b.start, b.end) : "";
+                                const comment = tdSuggestComment[b.id] ?? defaultComment;
+                                return (
+                                  <div className="mt-2.5 pt-2.5 border-t border-slate-100 text-[11px]">
+                                    <span className="text-slate-500">Not logged on Time Off yet — add as <strong className="text-slate-700">"{suggested}"</strong>?</span>
+                                    <div className="flex items-center gap-1.5 mt-1.5">
+                                      <input
+                                        value={comment}
+                                        onChange={(e) => setTdSuggestComment((p) => ({ ...p, [b.id]: e.target.value }))}
+                                        placeholder="Comment (optional)…"
+                                        className="flex-1 min-w-0 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-900"
+                                      />
+                                      <button
+                                        onClick={() => addSuggestedTimeOff(b, comment)}
+                                        className="shrink-0 px-2.5 py-1 rounded-full text-white font-medium whitespace-nowrap"
+                                        style={{ backgroundColor: TH.teal }}
+                                      >
+                                        Add to Time Off
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </div>
                           </div>
                         );
