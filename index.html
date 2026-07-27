@@ -526,8 +526,15 @@ function ensureStandingCoverageTasks(dataObj) {
       const key = cellKey(rule.assigneeId, date);
       const cell = nextCells[key] || emptyCell();
       const alreadyHas = (cell.tasks || []).some((t) => t.name === rule.label && t.start === rule.start && t.end === rule.end);
-      if (alreadyHas) return;
-      if (!isAvailableForWindow(cell, emp.shiftStart, emp.shiftEnd, rule.start, rule.end)) return; // leave as a gap
+      const available = isAvailableForWindow(cell, emp.shiftStart, emp.shiftEnd, rule.start, rule.end);
+      if (alreadyHas && !available) {
+        // They had this filled in, but something's since made them unavailable for the window
+        // (e.g. marked OOO) — pull the stale task rather than leaving it stuck on their day.
+        changed = true;
+        nextCells[key] = { ...cell, tasks: (cell.tasks || []).filter((t) => !(t.name === rule.label && t.start === rule.start && t.end === rule.end)) };
+        return;
+      }
+      if (alreadyHas || !available) return; // leave as a gap if unavailable and not yet filled
       changed = true;
       nextCells[key] = { ...cell, tasks: [...(cell.tasks || []), { id: `sc-${rule.id}-${date}`, name: rule.label, scope: "partial", start: rule.start, end: rule.end }] };
     });
@@ -557,16 +564,35 @@ function ensureCoverageSync(dataObj) {
   const employees = dataObj.employees || [];
   const empByName = {}; employees.forEach((e) => { empByName[e.name] = e; });
   const empById = {}; employees.forEach((e) => { empById[e.id] = e; });
-  const cells = { ...dataObj.cells };
   let changed = false;
 
+  // Step 1 — strip every previously auto-generated coverage task/block from every cell. Rebuilding
+  // from a clean slate each time (rather than diffing against whatever's already there) means any
+  // stale or mislabeled leftover from an earlier version of this logic can't stick around.
+  const cells = {};
+  Object.entries(dataObj.cells || {}).forEach(([key, cell]) => {
+    const hasCovTask = (cell.tasks || []).some((t) => t.id && t.id.startsWith("cov-"));
+    const hasCovBlock = Array.isArray(cell.blocks) && cell.blocks.some((b) => b.id && b.id.startsWith("covblk-"));
+    if (!hasCovTask && !hasCovBlock) { cells[key] = cell; return; }
+    changed = true;
+    const tasks = (cell.tasks || []).filter((t) => !(t.id && t.id.startsWith("cov-")));
+    if (Array.isArray(cell.blocks)) {
+      const blocks = cell.blocks.filter((b) => !(b.id && b.id.startsWith("covblk-")));
+      cells[key] = { ...cell, tasks, blocks, ...deriveLegacyFieldsFromBlocks(blocks) };
+    } else {
+      cells[key] = { ...cell, tasks };
+    }
+  });
+
+  // Step 2 — walk every source block with a "Covered by" set and add the coverage task (and
+  // Working block, if the window isn't already inside the covering person's normal shift) fresh.
   Object.keys(dataObj.cells || {}).forEach((key) => {
     const sepIdx = key.indexOf("::");
     const empId = key.slice(0, sepIdx), date = key.slice(sepIdx + 2);
     const sourceEmp = empById[empId];
-    const cell = dataObj.cells[key];
-    if (!sourceEmp || !cell) return;
-    const blocks = getCellBlocks(cell, sourceEmp.shiftStart, sourceEmp.shiftEnd);
+    const originalCell = dataObj.cells[key]; // coveredBy is source-of-truth, not a coverage artifact — read it from the untouched original
+    if (!sourceEmp || !originalCell) return;
+    const blocks = getCellBlocks(originalCell, sourceEmp.shiftStart, sourceEmp.shiftEnd);
     blocks.forEach((b) => {
       if (!b.coveredBy) return;
       const coEmp = empByName[b.coveredBy];
@@ -578,33 +604,22 @@ function ensureCoverageSync(dataObj) {
       const partial = !!(b.coveredByStart && b.coveredByEnd) || !!(b.start && b.end);
       const start = b.coveredByStart || b.start || "";
       const end = b.coveredByEnd || b.end || "";
-      const reason = coverageReasonLabel(cell.tasks, b.type, start, end);
+      const reason = coverageReasonLabel(originalCell.tasks, b.type, start, end);
       const coveringFor = (sourceEmp.name || "").split(" ")[0];
-      const existingTask = (coCell.tasks || []).find((t) => t.id === tid);
-      const coBlocksAll = partial && start && end ? getCellBlocks(coCell, coEmp.shiftStart, coEmp.shiftEnd).map((cb) => ({ ...cb })) : [];
-      const existingBlock = coBlocksAll.find((cb) => cb.id === bid);
-      const taskInSync = existingTask && existingTask.name === reason && existingTask.coveringFor === coveringFor;
-      const blockInSync = !existingBlock || (existingBlock.coverageLabel === reason && existingBlock.coveringFor === coveringFor);
-      if (taskInSync && blockInSync) return; // already synced with the current reason
-      changed = true;
       const task = { id: tid, name: reason, coveringFor, scope: partial ? "partial" : "allday", start: partial ? start : "", end: partial ? end : "" };
-      const nextTasks = existingTask ? (coCell.tasks || []).map((t) => (t.id === tid ? task : t)) : [...(coCell.tasks || []), task];
-      let patch = { tasks: nextTasks };
+      let patch = { tasks: [...(coCell.tasks || []), task] };
       if (partial && start && end) {
-        const alreadyWorking = coBlocksAll.some((cb) => cb.id !== bid && cb.type === "Working" && cb.start && cb.end && toMinutes(cb.start) <= toMinutes(start) && toMinutes(cb.end) >= toMinutes(end));
+        const coBlocksAll = getCellBlocks(coCell, coEmp.shiftStart, coEmp.shiftEnd).map((cb) => ({ ...cb }));
+        const alreadyWorking = coBlocksAll.some((cb) => cb.type === "Working" && cb.start && cb.end && toMinutes(cb.start) <= toMinutes(start) && toMinutes(cb.end) >= toMinutes(end));
         if (!alreadyWorking) {
-          const taggedBlock = { id: bid, type: "Working", start, end, coverageLabel: reason, coveringFor };
-          const bIdx = coBlocksAll.findIndex((cb) => cb.id === bid);
-          const nextBlocks = bIdx >= 0
-            ? coBlocksAll.map((cb, i) => (i === bIdx ? taggedBlock : cb))
-            : (coBlocksAll.length === 1 && coBlocksAll[0].type === "NotScheduled" ? [taggedBlock] : [...coBlocksAll, taggedBlock]);
-          patch = { tasks: nextTasks, blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) };
-        } else if (existingBlock) {
-          const nextBlocks = coBlocksAll.filter((cb) => cb.id !== bid);
-          patch = { tasks: nextTasks, blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) };
+          const nextBlocks = (coBlocksAll.length === 1 && coBlocksAll[0].type === "NotScheduled")
+            ? [{ id: bid, type: "Working", start, end, coverageLabel: reason, coveringFor }]
+            : [...coBlocksAll, { id: bid, type: "Working", start, end, coverageLabel: reason, coveringFor }];
+          patch = { tasks: patch.tasks, blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) };
         }
       }
       cells[coKey] = { ...coCell, ...patch };
+      changed = true;
     });
   });
 
