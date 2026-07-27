@@ -4298,6 +4298,53 @@ export default function ManagerSchedule() {
     return { onIb, total: pool.length, ibPct: Math.round((onIb / total) * 100) };
   };
 
+  // A "Covered by X" block writes a matching task onto X's own schedule for that date, so the
+  // coverage actually shows up on their day — not just as a label on the person who's out. The
+  // task id is deterministic (tied to the source person + block), so re-running this on every
+  // edit updates or removes the right task instead of piling up duplicates.
+  const coverageTaskId = (sourceEmpId, blockId) => `cov-${sourceEmpId}-${blockId}`;
+  const syncCoverageTasks = (sourceEmpId, date, oldBlocks, newBlocks) => {
+    const sourceEmp = employees.find((e) => e.id === sourceEmpId);
+    const empByName = {}; employees.forEach((e) => { empByName[e.name] = e; });
+    const oldById = {}; (oldBlocks || []).forEach((b) => { oldById[b.id] = b; });
+    const touched = {}; // empId -> that person's tasks array, only populated for people we actually change
+    const tasksFor = (empId) => {
+      if (!touched[empId]) touched[empId] = [...((cells[cellKey(empId, date)] || emptyCell()).tasks || [])];
+      return touched[empId];
+    };
+    const upsertOrRemove = (empId, tid, task) => {
+      const arr = tasksFor(empId);
+      const idx = arr.findIndex((t) => t.id === tid);
+      if (task) { if (idx >= 0) arr[idx] = task; else arr.push(task); }
+      else if (idx >= 0) arr.splice(idx, 1);
+    };
+
+    newBlocks.forEach((b) => {
+      const old = oldById[b.id];
+      const oldEmp = old?.coveredBy ? empByName[old.coveredBy] : null;
+      const newEmp = b.coveredBy ? empByName[b.coveredBy] : null;
+      const tid = coverageTaskId(sourceEmpId, b.id);
+      if (oldEmp && (!newEmp || oldEmp.id !== newEmp.id)) upsertOrRemove(oldEmp.id, tid, null);
+      if (newEmp) {
+        const partial = !!(b.coveredByStart && b.coveredByEnd) || !!(b.start && b.end);
+        const start = b.coveredByStart || b.start || "";
+        const end = b.coveredByEnd || b.end || "";
+        upsertOrRemove(newEmp.id, tid, {
+          id: tid, name: `Covering ${(sourceEmp?.name || "").split(" ")[0]} (${blockLabel(b.type)})`,
+          scope: partial ? "partial" : "allday", start: partial ? start : "", end: partial ? end : "",
+        });
+      }
+    });
+    // A block that got deleted outright (not just changed) still needs its coverage task cleaned up.
+    (oldBlocks || []).forEach((old) => {
+      if (old.coveredBy && !newBlocks.some((b) => b.id === old.id)) {
+        const emp = empByName[old.coveredBy];
+        if (emp) upsertOrRemove(emp.id, coverageTaskId(sourceEmpId, old.id), null);
+      }
+    });
+    return touched;
+  };
+
   const updateCell = (empId, date, patch) => {
     const key = cellKey(empId, date);
     const next = {
@@ -4311,8 +4358,17 @@ export default function ManagerSchedule() {
   // Saves a new block list for a day AND, in the same write, boils it down into the legacy
   // status/shiftStart/etc. fields — so Team Overview, coverage stats, the employee's own view,
   // and time-off sync all keep reading data that's actually current, with no separate sync step.
+  // Also syncs any "Covered by" onto the covering person's own schedule in the same write.
   const updateBlocks = (empId, date, newBlocks) => {
-    updateCell(empId, date, { blocks: newBlocks, ...deriveLegacyFieldsFromBlocks(newBlocks) });
+    const key = cellKey(empId, date);
+    const oldBlocks = (cells[key] && cells[key].blocks) || [];
+    const touchedCoverers = syncCoverageTasks(empId, date, oldBlocks, newBlocks);
+    const nextCells = { ...cells, [key]: { ...(cells[key] || emptyCell()), blocks: newBlocks, ...deriveLegacyFieldsFromBlocks(newBlocks) } };
+    Object.entries(touchedCoverers).forEach(([coEmpId, tasks]) => {
+      const coKey = cellKey(coEmpId, date);
+      nextCells[coKey] = { ...(cells[coKey] || emptyCell()), tasks };
+    });
+    persist({ ...data, cells: nextCells, updatedAt: Date.now() });
   };
 
   // Adding several tasks at once (multi-select in TaskBuilder) must go through ONE persist
@@ -5100,7 +5156,6 @@ export default function ManagerSchedule() {
 
               {(() => {
                 const blocks = editCell.blocks || [];
-                const hasWorking = blocks.some((b) => b.type === "Working");
                 const isAllDay = (b) => !b.start && !b.end;
 
                 const addBlock = () => {
@@ -5116,6 +5171,7 @@ export default function ManagerSchedule() {
                 };
                 const patchBlock = (id, patch) => updateBlocks(editing.empId, editing.date, blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)));
                 const removeBlock = (id) => updateBlocks(editing.empId, editing.date, blocks.filter((b) => b.id !== id));
+                const firstWorkingId = blocks.find((b) => b.type === "Working")?.id;
 
                 return (
                   <>
@@ -5185,6 +5241,20 @@ export default function ManagerSchedule() {
                                 </div>
                               )}
 
+                              {/* Skills sit right under this block's own hours — where they apply —
+                                  rather than in a separate section disconnected from the time. */}
+                              {b.id === firstWorkingId && (
+                                <div className="mt-2.5 pt-2.5 border-t border-slate-100">
+                                  <span className="block text-[10px] font-mono uppercase tracking-wide text-slate-400 mb-1.5">Skills</span>
+                                  <TaskBuilder
+                                    tasks={editCell.tasks}
+                                    onAddBatch={(newTasks) => addTasks(editing.empId, editing.date, newTasks)}
+                                    onRemove={(taskId) => removeTask(editing.empId, editing.date, taskId)}
+                                    functionOptions={functionOptions}
+                                  />
+                                </div>
+                              )}
+
                               {b.type !== "Working" && b.type !== "NotScheduled" && (
                                 <div className={`${(b.type === "Working" || !isAllDay(b)) ? "mt-2.5 pt-2.5 border-t border-slate-100" : ""}`}>
                                   <div className="flex items-center gap-2">
@@ -5228,20 +5298,6 @@ export default function ManagerSchedule() {
                         );
                       })}
                     </div>
-
-                    {hasWorking && (
-                      <>
-                        <span className="block text-[10px] font-mono uppercase tracking-wide text-slate-400 mb-1.5">Skills — each can be all day or specific hours</span>
-                        <div className="mb-4">
-                          <TaskBuilder
-                            tasks={editCell.tasks}
-                            onAddBatch={(newTasks) => addTasks(editing.empId, editing.date, newTasks)}
-                            onRemove={(taskId) => removeTask(editing.empId, editing.date, taskId)}
-                            functionOptions={functionOptions}
-                          />
-                        </div>
-                      </>
-                    )}
                   </>
                 );
               })()}
