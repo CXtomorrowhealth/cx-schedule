@@ -526,15 +526,8 @@ function ensureStandingCoverageTasks(dataObj) {
       const key = cellKey(rule.assigneeId, date);
       const cell = nextCells[key] || emptyCell();
       const alreadyHas = (cell.tasks || []).some((t) => t.name === rule.label && t.start === rule.start && t.end === rule.end);
-      const available = isAvailableForWindow(cell, emp.shiftStart, emp.shiftEnd, rule.start, rule.end);
-      if (alreadyHas && !available) {
-        // They had this filled in, but something's since made them unavailable for the window
-        // (e.g. marked OOO) — pull the stale task rather than leaving it stuck on their day.
-        changed = true;
-        nextCells[key] = { ...cell, tasks: (cell.tasks || []).filter((t) => !(t.name === rule.label && t.start === rule.start && t.end === rule.end)) };
-        return;
-      }
-      if (alreadyHas || !available) return; // leave as a gap if unavailable and not yet filled
+      if (alreadyHas) return;
+      if (!isAvailableForWindow(cell, emp.shiftStart, emp.shiftEnd, rule.start, rule.end)) return; // leave as a gap
       changed = true;
       nextCells[key] = { ...cell, tasks: [...(cell.tasks || []), { id: `sc-${rule.id}-${date}`, name: rule.label, scope: "partial", start: rule.start, end: rule.end }] };
     });
@@ -552,8 +545,10 @@ function ensureStandingCoverageTasks(dataObj) {
 // (e.g. the standing "After Hours Coverage" task), that's the real reason someone's covering —
 // more useful than the generic block type ("OOO"). Falls back to the block type when there's no
 // matching skill (e.g. a plain all-day OOO with nothing scheduled to hand off).
-function coverageReasonLabel(sourceTasks, blockType, start, end) {
+function coverageReasonLabel(sourceTasks, blockType, start, end, standingRules, sourceEmpId, weekday) {
   if (start && end) {
+    const rule = (standingRules || []).find((r) => r.assigneeId === sourceEmpId && r.weekdays.includes(weekday) && r.start === start && r.end === end);
+    if (rule) return rule.label;
     const match = (sourceTasks || []).find((t) => t.scope === "partial" && t.start && t.end && toMinutes(t.start) <= toMinutes(start) && toMinutes(t.end) >= toMinutes(end));
     if (match) return match.name;
   }
@@ -604,7 +599,7 @@ function ensureCoverageSync(dataObj) {
       const partial = !!(b.coveredByStart && b.coveredByEnd) || !!(b.start && b.end);
       const start = b.coveredByStart || b.start || "";
       const end = b.coveredByEnd || b.end || "";
-      const reason = coverageReasonLabel(originalCell.tasks, b.type, start, end);
+      const reason = coverageReasonLabel(originalCell.tasks, b.type, start, end, dataObj.standingCoverage, empId, new Date(date + "T00:00:00").getDay());
       const coveringFor = (sourceEmp.name || "").split(" ")[0];
       const task = { id: tid, name: reason, coveringFor, scope: partial ? "partial" : "allday", start: partial ? start : "", end: partial ? end : "" };
       let patch = { tasks: [...(coCell.tasks || []), task] };
@@ -4500,7 +4495,8 @@ export default function ManagerSchedule() {
         const start = b.coveredByStart || b.start || "";
         const end = b.coveredByEnd || b.end || "";
         const sourceTasks = (cells[cellKey(sourceEmpId, date)] || emptyCell()).tasks;
-        const reason = coverageReasonLabel(sourceTasks, b.type, start, end);
+        const weekday = new Date(date + "T00:00:00").getDay();
+        const reason = coverageReasonLabel(sourceTasks, b.type, start, end, data.standingCoverage, sourceEmpId, weekday);
         addCoverageFor(newEmp.id, tid, bid, reason, (sourceEmp?.name || "").split(" ")[0], partial, start, end);
       }
     });
