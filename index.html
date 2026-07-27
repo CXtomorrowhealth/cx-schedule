@@ -491,8 +491,9 @@ function ensureAutoDates(dataObj) {
   return { data: { ...dataObj, dates: nextDates, updatedAt: Date.now() }, changed: true };
 }
 
-// Weekly cleanup: on Tuesdays only, drop any date older than this week's Monday (and the cells
-// that went with it), so the date list doesn't grow forever. Doesn't touch this week or next —
+// Weekly cleanup: on Tuesdays only, move any date older than this week's Monday (and its
+// cells) out of the live `dates`/`cells` — into `scheduleArchive` instead of deleting them —
+// so the live app stays lean but nothing is actually lost. Doesn't touch this week or next —
 // ensureAutoDates already guarantees those stay populated. A no-op every other day of the week,
 // and a no-op on Tuesday itself once there's nothing left to prune.
 function pruneOldDatesOnTuesday(dataObj) {
@@ -504,11 +505,20 @@ function pruneOldDatesOnTuesday(dataObj) {
   const toRemove = (dataObj.dates || []).filter((d) => d < cutoff);
   if (toRemove.length === 0) return { data: dataObj, changed: false };
   const nextCells = { ...dataObj.cells };
+  const nextArchive = { ...(dataObj.scheduleArchive || {}) };
   (dataObj.employees || []).forEach((e) => {
-    toRemove.forEach((d) => delete nextCells[cellKey(e.id, d)]);
+    toRemove.forEach((d) => {
+      const key = cellKey(e.id, d);
+      const cell = nextCells[key];
+      if (cell) {
+        if (!nextArchive[d]) nextArchive[d] = {};
+        nextArchive[d][e.id] = cell;
+      }
+      delete nextCells[key];
+    });
   });
   const nextDates = (dataObj.dates || []).filter((d) => d >= cutoff);
-  return { data: { ...dataObj, dates: nextDates, cells: nextCells, updatedAt: Date.now() }, changed: true };
+  return { data: { ...dataObj, dates: nextDates, cells: nextCells, scheduleArchive: nextArchive, updatedAt: Date.now() }, changed: true };
 }
 
 // Explicit codes for the current roster — set once here so everyone has a known, memorable
@@ -3329,6 +3339,7 @@ export default function ManagerSchedule() {
   const [logPickerEmp, setLogPickerEmp] = useState("");
   const [logDate, setLogDate] = useState("");
   const [calAddFor, setCalAddFor] = useState(null); // date string — which day's quick-add picker is open in Calendar view
+  const [viewArchiveDate, setViewArchiveDate] = useState(null); // date string — which archived date's modal is open, if any
   const [logType, setLogType] = useState("PTO");
   const [logScope, setLogScope] = useState("allday");
   const [logStart, setLogStart] = useState("09:00");
@@ -4073,6 +4084,19 @@ export default function ManagerSchedule() {
             >
               <CalendarPlus className="w-3.5 h-3.5" /> Add date
             </button>
+            {Object.keys(data.scheduleArchive || {}).length > 0 && (
+              <select
+                value=""
+                onChange={(e) => { if (e.target.value) setViewArchiveDate(e.target.value); }}
+                className="text-xs px-3 py-1.5 rounded-full border bg-white"
+                style={{ borderColor: TH.border, color: TH.textMid }}
+              >
+                <option value="">Past schedules…</option>
+                {Object.keys(data.scheduleArchive || {}).sort().reverse().map((d) => (
+                  <option key={d} value={d}>{fmtDate(d)}</option>
+                ))}
+              </select>
+            )}
           </div>
 
           <TimelineView
@@ -4088,6 +4112,48 @@ export default function ManagerSchedule() {
             timeOffDates={data.timeOffDates || []}
           />
         </>
+      )}
+
+      {/* Read-only viewer for an archived past week's schedule — nothing here is editable,
+          since it's history, not the live schedule. */}
+      {viewArchiveDate && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setViewArchiveDate(null)}>
+          <div className="bg-white border border-slate-200 rounded-lg w-full max-w-lg max-h-[85vh] overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-sm font-semibold text-slate-900">{fmtDate(viewArchiveDate)} (archived)</h3>
+              <button onClick={() => setViewArchiveDate(null)} className="text-slate-400 hover:text-slate-600"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-[11px] text-slate-400 mb-3">Read-only — this week has rolled off the live schedule.</p>
+            <div className="space-y-2">
+              {employees.map((emp) => {
+                const archivedCell = (data.scheduleArchive || {})[viewArchiveDate]?.[emp.id];
+                if (!archivedCell) return null;
+                const blocks = getCellBlocks(archivedCell, emp.shiftStart, emp.shiftEnd);
+                const isNotScheduled = blocks.length === 1 && blocks[0].type === "NotScheduled";
+                return (
+                  <div key={emp.id} className="border border-slate-100 rounded-lg p-2.5">
+                    <div className="text-xs font-medium text-slate-900 mb-1.5">{emp.name}</div>
+                    {isNotScheduled ? (
+                      <div className="text-xs text-slate-400 italic">Not scheduled</div>
+                    ) : (
+                      <DayBlocksBar blocks={blocks} workingColor={teamColor(emp.team).accent} height="h-6" />
+                    )}
+                    {archivedCell.tasks && archivedCell.tasks.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1.5">
+                        {archivedCell.tasks.map((t) => (
+                          <span key={t.id} className={`text-[10px] px-1.5 py-0.5 rounded border ${taskColor(t.name)}`}>{t.name}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {employees.every((emp) => !(data.scheduleArchive || {})[viewArchiveDate]?.[emp.id]) && (
+                <div className="text-xs text-slate-400 italic">Nobody had a schedule logged for this archived date.</div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {tab === "overview" && (
