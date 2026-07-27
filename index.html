@@ -4298,25 +4298,62 @@ export default function ManagerSchedule() {
     return { onIb, total: pool.length, ibPct: Math.round((onIb / total) * 100) };
   };
 
-  // A "Covered by X" block writes a matching task onto X's own schedule for that date, so the
-  // coverage actually shows up on their day — not just as a label on the person who's out. The
-  // task id is deterministic (tied to the source person + block), so re-running this on every
-  // edit updates or removes the right task instead of piling up duplicates.
+  // A "Covered by X" block does two things on X's own schedule for that date: adds a task
+  // label ("Covering [Name] (...)") AND, if the coverage window isn't already inside one of
+  // X's existing Working blocks, adds a real Working block for exactly that window — so the
+  // shift itself shows up on their day, not just a tag. Both are keyed off the same
+  // deterministic id (tied to the source person + block), so re-running this on every edit
+  // updates or removes the right task/block instead of piling up duplicates, and leaves it
+  // alone entirely if X was already scheduled to work through that window anyway.
   const coverageTaskId = (sourceEmpId, blockId) => `cov-${sourceEmpId}-${blockId}`;
-  const syncCoverageTasks = (sourceEmpId, date, oldBlocks, newBlocks) => {
+  const coverageBlockId = (sourceEmpId, blockId) => `covblk-${sourceEmpId}-${blockId}`;
+  const syncCoverage = (sourceEmpId, date, oldBlocks, newBlocks) => {
     const sourceEmp = employees.find((e) => e.id === sourceEmpId);
     const empByName = {}; employees.forEach((e) => { empByName[e.name] = e; });
     const oldById = {}; (oldBlocks || []).forEach((b) => { oldById[b.id] = b; });
-    const touched = {}; // empId -> that person's tasks array, only populated for people we actually change
-    const tasksFor = (empId) => {
-      if (!touched[empId]) touched[empId] = [...((cells[cellKey(empId, date)] || emptyCell()).tasks || [])];
-      return touched[empId];
+    const touchedTasks = {};  // empId -> tasks array
+    const touchedBlocks = {}; // empId -> blocks array
+    const getTasks = (empId) => {
+      if (!touchedTasks[empId]) touchedTasks[empId] = [...((cells[cellKey(empId, date)] || emptyCell()).tasks || [])];
+      return touchedTasks[empId];
     };
-    const upsertOrRemove = (empId, tid, task) => {
-      const arr = tasksFor(empId);
-      const idx = arr.findIndex((t) => t.id === tid);
-      if (task) { if (idx >= 0) arr[idx] = task; else arr.push(task); }
-      else if (idx >= 0) arr.splice(idx, 1);
+    const getBlocks = (empId) => {
+      if (!touchedBlocks[empId]) {
+        const emp = employees.find((e) => e.id === empId);
+        const cell = cells[cellKey(empId, date)] || emptyCell();
+        touchedBlocks[empId] = getCellBlocks(cell, emp?.shiftStart, emp?.shiftEnd).map((b) => ({ ...b }));
+      }
+      return touchedBlocks[empId];
+    };
+    const removeCoverageFor = (empId, tid, bid) => {
+      const tasks = getTasks(empId);
+      const ti = tasks.findIndex((t) => t.id === tid);
+      if (ti >= 0) tasks.splice(ti, 1);
+      const blocks = getBlocks(empId);
+      const bi = blocks.findIndex((b) => b.id === bid);
+      if (bi >= 0) blocks.splice(bi, 1);
+    };
+    const addCoverageFor = (empId, tid, bid, label, partial, start, end) => {
+      const tasks = getTasks(empId);
+      const task = { id: tid, name: label, scope: partial ? "partial" : "allday", start: partial ? start : "", end: partial ? end : "" };
+      const ti = tasks.findIndex((t) => t.id === tid);
+      if (ti >= 0) tasks[ti] = task; else tasks.push(task);
+
+      const blocks = getBlocks(empId);
+      const bi = blocks.findIndex((b) => b.id === bid);
+      if (partial && start && end) {
+        const alreadyWorking = blocks.some((b) => b.id !== bid && b.type === "Working" && b.start && b.end && toMinutes(b.start) <= toMinutes(start) && toMinutes(b.end) >= toMinutes(end));
+        if (alreadyWorking) {
+          if (bi >= 0) blocks.splice(bi, 1); // their normal shift already covers this window
+        } else {
+          const newBlock = { id: bid, type: "Working", start, end };
+          if (bi >= 0) blocks[bi] = newBlock;
+          else if (blocks.length === 1 && blocks[0].type === "NotScheduled") blocks.splice(0, 1, newBlock);
+          else blocks.push(newBlock);
+        }
+      } else if (bi >= 0) {
+        blocks.splice(bi, 1); // all-day coverage has no defined window to add as a shift block
+      }
     };
 
     newBlocks.forEach((b) => {
@@ -4324,25 +4361,37 @@ export default function ManagerSchedule() {
       const oldEmp = old?.coveredBy ? empByName[old.coveredBy] : null;
       const newEmp = b.coveredBy ? empByName[b.coveredBy] : null;
       const tid = coverageTaskId(sourceEmpId, b.id);
-      if (oldEmp && (!newEmp || oldEmp.id !== newEmp.id)) upsertOrRemove(oldEmp.id, tid, null);
+      const bid = coverageBlockId(sourceEmpId, b.id);
+      if (oldEmp && (!newEmp || oldEmp.id !== newEmp.id)) removeCoverageFor(oldEmp.id, tid, bid);
       if (newEmp) {
         const partial = !!(b.coveredByStart && b.coveredByEnd) || !!(b.start && b.end);
         const start = b.coveredByStart || b.start || "";
         const end = b.coveredByEnd || b.end || "";
-        upsertOrRemove(newEmp.id, tid, {
-          id: tid, name: `Covering ${(sourceEmp?.name || "").split(" ")[0]} (${blockLabel(b.type)})`,
-          scope: partial ? "partial" : "allday", start: partial ? start : "", end: partial ? end : "",
-        });
+        addCoverageFor(newEmp.id, tid, bid, `Covering ${(sourceEmp?.name || "").split(" ")[0]} (${blockLabel(b.type)})`, partial, start, end);
       }
     });
-    // A block that got deleted outright (not just changed) still needs its coverage task cleaned up.
+    // A block that got deleted outright (not just changed) still needs its coverage cleaned up.
     (oldBlocks || []).forEach((old) => {
       if (old.coveredBy && !newBlocks.some((b) => b.id === old.id)) {
         const emp = empByName[old.coveredBy];
-        if (emp) upsertOrRemove(emp.id, coverageTaskId(sourceEmpId, old.id), null);
+        if (emp) removeCoverageFor(emp.id, coverageTaskId(sourceEmpId, old.id), coverageBlockId(sourceEmpId, old.id));
       }
     });
-    return touched;
+    return { tasks: touchedTasks, blocks: touchedBlocks };
+  };
+  // Merges the tasks/blocks touched by syncCoverage into a cells patch, deriving legacy fields
+  // for anyone whose blocks actually changed so every other tab stays in sync too.
+  const applyCoverageSync = (baseCells, date, synced) => {
+    const nextCells = { ...baseCells };
+    Object.keys(synced.tasks).forEach((coEmpId) => {
+      const coKey = cellKey(coEmpId, date);
+      const base = baseCells[coKey] || cells[coKey] || emptyCell();
+      const blocks = synced.blocks[coEmpId];
+      nextCells[coKey] = blocks
+        ? { ...base, tasks: synced.tasks[coEmpId], blocks, ...deriveLegacyFieldsFromBlocks(blocks) }
+        : { ...base, tasks: synced.tasks[coEmpId] };
+    });
+    return nextCells;
   };
 
   const updateCell = (empId, date, patch) => {
@@ -4362,12 +4411,9 @@ export default function ManagerSchedule() {
   const updateBlocks = (empId, date, newBlocks) => {
     const key = cellKey(empId, date);
     const oldBlocks = (cells[key] && cells[key].blocks) || [];
-    const touchedCoverers = syncCoverageTasks(empId, date, oldBlocks, newBlocks);
-    const nextCells = { ...cells, [key]: { ...(cells[key] || emptyCell()), blocks: newBlocks, ...deriveLegacyFieldsFromBlocks(newBlocks) } };
-    Object.entries(touchedCoverers).forEach(([coEmpId, tasks]) => {
-      const coKey = cellKey(coEmpId, date);
-      nextCells[coKey] = { ...(cells[coKey] || emptyCell()), tasks };
-    });
+    const synced = syncCoverage(empId, date, oldBlocks, newBlocks);
+    let nextCells = { ...cells, [key]: { ...(cells[key] || emptyCell()), blocks: newBlocks, ...deriveLegacyFieldsFromBlocks(newBlocks) } };
+    nextCells = applyCoverageSync(nextCells, date, synced);
     persist({ ...data, cells: nextCells, updatedAt: Date.now() });
   };
 
@@ -4556,18 +4602,22 @@ export default function ManagerSchedule() {
     let next = addDateTo(data, logDate);
     const key = cellKey(logTimeOff, logDate);
     const hours = logScope === "partial" ? hoursBetween(logStart, logEnd) : (logHours === "" ? "" : logHours);
-    next = {
-      ...next,
-      cells: {
-        ...next.cells,
-        [key]: {
-          tasks: [], status: logType,
-          statusScope: logScope, statusStart: logScope === "partial" ? logStart : "", statusEnd: logScope === "partial" ? logEnd : "",
-          shiftStart: "", shiftEnd: "", hours, coveredBy: logCoveredBy,
-        },
-      },
-      updatedAt: Date.now(),
+
+    // "Covered by" here needs the same sync as the Schedule tab's block editor. "b0" is the id
+    // a legacy-status cell's single block always derives to, so both entry points converge on
+    // the same coverage task/block if this same day later gets opened in the block editor too.
+    const prevCell = next.cells[key];
+    const oldBlocks = prevCell?.coveredBy ? [{ id: "b0", type: prevCell.status, coveredBy: prevCell.coveredBy, start: prevCell.statusStart || "", end: prevCell.statusEnd || "" }] : [];
+    const newBlocksForSync = [{ id: "b0", type: logType, coveredBy: logCoveredBy, start: logScope === "partial" ? logStart : "", end: logScope === "partial" ? logEnd : "" }];
+    const synced = syncCoverage(logTimeOff, logDate, oldBlocks, newBlocksForSync);
+    let nextCells = applyCoverageSync(next.cells, logDate, synced);
+    nextCells[key] = {
+      tasks: [], status: logType,
+      statusScope: logScope, statusStart: logScope === "partial" ? logStart : "", statusEnd: logScope === "partial" ? logEnd : "",
+      shiftStart: "", shiftEnd: "", hours, coveredBy: logCoveredBy,
     };
+    next = { ...next, cells: nextCells, updatedAt: Date.now() };
+
 
     // Deduct from the upcoming balance for PTO/Sick, in day-equivalents (8h = 1 day)
     if ((logType === "PTO" || logType === "Sick") && hours) {
