@@ -31,7 +31,7 @@
 </div>
 <script type="text/babel" data-type="module" data-presets="react">
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Plus, Trash2, X, RefreshCw, Users, CalendarPlus, Save, AlertCircle, AlertTriangle, CalendarDays, Gift, Clock3, UserCheck, Mail, Copy, Check, Pencil, Gauge, Microscope, Lock, FileSpreadsheet, Download, Undo2, Palmtree, Thermometer, TrendingDown } from "lucide-react";
+import { Plus, Trash2, X, RefreshCw, Users, CalendarPlus, Save, AlertCircle, AlertTriangle, CalendarDays, Gift, Clock3, UserCheck, Mail, Copy, Check, Pencil, Gauge, Microscope, Lock, FileSpreadsheet, Download, Undo2, Palmtree, Thermometer, TrendingDown, MessageSquare, ChevronLeft, ChevronRight } from "lucide-react";
 
 const STORAGE_KEY = "cx-schedule-v1";
 // Better than a plaintext constant, but still a client-side check — someone determined enough
@@ -1184,6 +1184,31 @@ function ibCoverageColor(pct) {
 // Colors a Time Off calendar chip by its actual type, so the type is visible without hovering.
 // Real entries are sometimes free-form (e.g. "Sick 0.25 day", "0.25 Day") rather than one of
 // the exact standard labels, so this matches by keyword rather than exact string.
+// Coverage dot color scale — same visual language as Holiday Coverage: quiet when nobody's out,
+// escalating color as more people are out the same day.
+function timeOffCoverageDot(count) {
+  if (count === 0) return null;
+  if (count === 1) return { color: "#00a878" };
+  if (count === 2) return { color: "#d97706" };
+  return { color: "#dc2626" };
+}
+
+// Returns 28 consecutive dates (4 weeks) starting from the Monday of "this week", shifted by
+// pageOffset * 28 days. pageOffset 0 = the page containing today.
+function timeOffWindowDates(pageOffset) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const day = today.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  const thisMonday = new Date(today); thisMonday.setDate(today.getDate() + mondayOffset);
+  const start = new Date(thisMonday); start.setDate(thisMonday.getDate() + pageOffset * 28);
+  const result = [];
+  for (let i = 0; i < 28; i++) {
+    const d = new Date(start); d.setDate(start.getDate() + i);
+    result.push(d.toISOString().slice(0, 10));
+  }
+  return result;
+}
+
 function timeOffEntryColor(label) {
   const l = (label || "").toLowerCase();
   if (l.includes("sick")) return { bg: "#fef2f2", text: "#be123c" };
@@ -2027,6 +2052,61 @@ function GuidelineBar({ committed, guideline, scaleMax, color }) {
   );
 }
 
+// Best-effort day-fraction for a free-form time-off label, e.g. "Sick 0.25 day" -> 0.25,
+// "0.5 day" -> 0.5. Falls back to a whole day for plain labels like "Approved".
+function labelDayFraction(label) {
+  const m = (label || "").match(/([\d.]+)\s*day/i);
+  return m ? parseFloat(m[1]) : 1;
+}
+const isSickLabel = (label) => /sick/i.test(label || "");
+const isPtoLikeLabel = (label) => !isSickLabel(label) && !/flex|loa/i.test(label || "");
+
+// Real month-by-month cumulative PTO usage for one person this year, built from the actual
+// logged Time Off entries rather than mock data. Scaled to land exactly on their authoritative
+// committed-PTO total (from the balances fields) so the number stays correct while the *shape*
+// of the bars (front-loaded vs. steady vs. barely started) reflects what was actually logged.
+function buildPtoPacing(empId, timeOffDates, committedPto) {
+  const now = new Date();
+  const year = now.getFullYear();
+  const uptoMonth = now.getMonth(); // 0-indexed, inclusive
+  const monthly = new Array(uptoMonth + 1).fill(0);
+  (timeOffDates || []).forEach((td) => {
+    if (td.empId !== empId || !isPtoLikeLabel(td.label)) return;
+    const d = new Date(td.date + "T00:00:00");
+    if (d.getFullYear() !== year || d.getMonth() > uptoMonth) return;
+    monthly[d.getMonth()] += labelDayFraction(td.label);
+  });
+  const cumulative = [];
+  let running = 0;
+  monthly.forEach((v) => { running += v; cumulative.push(running); });
+  const rawTotal = cumulative[cumulative.length - 1] || 0;
+  const scale = rawTotal > 0 && committedPto > 0 ? committedPto / rawTotal : 1;
+  const scaled = cumulative.map((v) => Math.round(v * scale * 10) / 10);
+  const months = Array.from({ length: uptoMonth + 1 }, (_, i) =>
+    new Date(year, i, 1).toLocaleDateString("en-US", { month: "short" })
+  );
+  return { months, values: scaled };
+}
+
+// Bars fade lighter → darker from Jan to now, so the shape of someone's pacing (front-loaded
+// vs. steady vs. barely started) is visible at a glance alongside the guideline range.
+function PacingBar({ values, color, height = 26 }) {
+  const max = Math.max(...values, PTO_GUIDELINE.max, 1) * 1.05;
+  return (
+    <div className="flex items-end gap-[2px]" style={{ height }}>
+      {values.map((v, i) => (
+        <div
+          key={i}
+          className="rounded-t"
+          style={{ width: 6, height: `${(v / max) * 100}%`, backgroundColor: color, opacity: 0.35 + (i / Math.max(values.length, 1)) * 0.65, minHeight: 2 }}
+          title={`${v}d`}
+        />
+      ))}
+    </div>
+  );
+}
+
+
 // ── CA performance eval — same scoring model as the standalone CA Scorecard tool ──
 // Tickets/avail-hr benchmark, Available%/ACW% targets, and QA-score bands are the same numbers
 // used there, so a rating here means the same thing it would mean in that tool.
@@ -2146,6 +2226,44 @@ function analyzeCaEval(ev, avgQa) {
     highlights.push("Enter tickets/hr, Available %, ACW %, or a QA score above for a full analysis.");
 
   return { highlights, improvements, coaching };
+}
+
+// Trend-based flag on top of the current-month percentile score — catches a QA slide that
+// hasn't dropped below the "needs work" line yet but is heading there. Mirrors the approved
+// single-view mockup's logic: 3 months straight declining, or a sharp drop vs recent average.
+function qaTrendFlag(qaValues) {
+  const vals = qaValues.filter((v) => v != null);
+  const n = vals.length;
+  if (n === 0) return null;
+  const current = vals[n - 1];
+  if (n >= 3 && vals[n - 1] < vals[n - 2] && vals[n - 2] < vals[n - 3]) {
+    return { text: `QA down 3 months straight (${vals[n - 3]}% → ${vals[n - 2]}% → ${current}%)` };
+  }
+  if (n >= 4) {
+    const priorAvg = (vals[n - 4] + vals[n - 3] + vals[n - 2]) / 3;
+    const drop = priorAvg - current;
+    if (drop >= 15) return { text: `QA down ${drop.toFixed(0)} pts vs recent 3-month average` };
+  }
+  return null;
+}
+
+function QaSparkline({ values, color, height = 22, width = 68 }) {
+  const vals = values.filter((v) => v != null);
+  if (vals.length < 2) return <span className="text-[10px] text-slate-300 italic">not enough history</span>;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const range = max - min || 1;
+  const pts = vals.map((v, i) => {
+    const x = (i / (vals.length - 1)) * width;
+    const y = height - ((v - min) / range) * height;
+    return `${x},${y}`;
+  }).join(" ");
+  const lastY = height - ((vals[vals.length - 1] - min) / range) * height;
+  return (
+    <svg width={width} height={height} className="overflow-visible shrink-0">
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={width} cy={lastY} r="2.2" fill={color} />
+    </svg>
+  );
 }
 
 // ── CSV engine ported from the standalone CA Scorecard tool, so the same three CSV exports —
@@ -2755,7 +2873,7 @@ function matchScorecardCSVs({ ticketsRows, productivityRows, qaRows, histRows },
   return { results, unmatched: dedupedUnmatched };
 }
 
-function PtoEvalTab({ employees, timeOff, notes, updateNote, updateTimeOff }) {
+function PtoEvalTab({ employees, timeOff, timeOffDates, notes, updateNote, updateTimeOff }) {
   const [copiedId, setCopiedId] = useState(null);
   const [fallbackText, setFallbackText] = useState(null);
   const [openDetails, setOpenDetails] = useState({}); // empId -> bool
@@ -2771,104 +2889,97 @@ function PtoEvalTab({ employees, timeOff, notes, updateNote, updateTimeOff }) {
     }
   };
 
+  // "On track" sinks to the bottom; everything else (below/near/trending/above guideline) —
+  // i.e. anything worth a manager's glance — floats to the top.
+  const PTO_SORT_ORDER = { amber: 0, sky: 1, emerald: 2, slate: 1 };
+  const evaluated = employees.map((emp) => {
+    const t = timeOff[emp.id] || { allPto: 0, allSick: 0, pastPto: 0, pastSick: 0, upcomingPto: 0, upcomingSick: 0 };
+    const ev = evaluatePto(t);
+    const pacing = buildPtoPacing(emp.id, timeOffDates, ev.committedPto);
+    return { emp, t, ev, pacing };
+  });
+  const sorted = [...evaluated].sort((a, b) => (PTO_SORT_ORDER[a.ev.tone] ?? 1) - (PTO_SORT_ORDER[b.ev.tone] ?? 1));
+  const flaggedCount = sorted.filter((r) => r.ev.tone !== "emerald").length;
+
   return (
     <div className="p-4 sm:p-6">
-      <div className="overflow-auto border border-slate-200 rounded-lg mb-3">
-        <table className="min-w-full text-sm">
-          <thead className="bg-white">
-            <tr className="text-[11px] font-mono text-slate-500">
-              <th className="text-left px-3 py-2">Care Advocate</th>
-              <th className="text-left px-2 py-2">Status</th>
-              <th className="text-left px-2 py-2">PTO ({PTO_GUIDELINE.min}-{PTO_GUIDELINE.max}d)</th>
-              <th className="text-left px-2 py-2">Sick ({SICK_GUIDELINE.min}-{SICK_GUIDELINE.max}d)</th>
-              <th className="text-left px-2 py-2">Recommendation</th>
-              <th className="px-2 py-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {employees.map((emp, i) => {
-              const t = timeOff[emp.id] || { allPto: 0, allSick: 0, pastPto: 0, pastSick: 0, upcomingPto: 0, upcomingSick: 0 };
-              const ev = evaluatePto(t);
-              const note = notes[emp.id] || "";
-              const emailText = buildPtoEmailText(emp, t, ev, note, quarter);
-              const isOpen = !!openDetails[emp.id];
-              return (
-                <React.Fragment key={emp.id}>
-                  <tr className={i % 2 ? "bg-slate-50" : "bg-white"}>
-                    <td className="px-3 py-2">
-                      <div className="text-sm font-medium text-slate-900 whitespace-nowrap">{emp.name}</div>
-                      <div className="text-[10px] text-slate-500 font-mono">{emp.team}</div>
-                    </td>
-                    <td className="px-2 py-2">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium whitespace-nowrap ${PTO_TONE_CLASSES[ev.tone]}`}>{ev.status}</span>
-                    </td>
-                    <td className="px-2 py-2 min-w-[140px]">
-                      <div className="text-[10px] font-mono text-slate-700 font-semibold mb-0.5">{ev.committedPto}d</div>
-                      <GuidelineBar committed={ev.committedPto} guideline={PTO_GUIDELINE} scaleMax={20} color={TH.teal} />
-                    </td>
-                    <td className="px-2 py-2 min-w-[140px]">
-                      <div className="text-[10px] font-mono text-slate-700 font-semibold mb-0.5">{ev.committedSick}d</div>
-                      <GuidelineBar committed={ev.committedSick} guideline={SICK_GUIDELINE} scaleMax={8} color="#f43f5e" />
-                    </td>
-                    <td className="px-2 py-2 text-xs text-slate-700 max-w-[260px]">
-                      {ev.rec}
-                      {ev.sickFlag && <div className={`mt-0.5 ${ev.committedSick > SICK_GUIDELINE.max ? "text-rose-700" : "text-amber-700"}`}>{ev.sickFlag}</div>}
-                    </td>
-                    <td className="px-2 py-2 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        <button
-                          onClick={() => setOpenDetails((p) => ({ ...p, [emp.id]: !p[emp.id] }))}
-                          className="text-[11px] px-2 py-1 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 whitespace-nowrap"
-                        >
-                          {isOpen ? "▾ Edit" : "▸ Edit"}
-                        </button>
-                        <button
-                          onClick={() => copy(emp.id, emailText)}
-                          className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 whitespace-nowrap"
-                        >
-                          {copiedId === emp.id ? <><Check className="w-3 h-3" /> Copied</> : <><Copy className="w-3 h-3" /> Copy</>}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                  {isOpen && (
-                    <tr className={i % 2 ? "bg-slate-50" : "bg-white"}>
-                      <td colSpan={6} className="px-3 pb-4 pt-1 border-b border-slate-200">
-                        <div className="border-t border-slate-100 pt-3">
-                          <div className="mb-3">
-                            <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1.5">Balances (days)</div>
-                            <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 max-w-xl">
-                              {["allPto", "allSick", "pastPto", "pastSick", "upcomingPto", "upcomingSick"].map((f) => (
-                                <div key={f}>
-                                  <label className="block text-[9px] font-mono text-slate-400 mb-0.5">
-                                    {{ allPto: "All PTO", allSick: "All Sick", pastPto: "Past PTO", pastSick: "Past Sick", upcomingPto: "Upcoming PTO", upcomingSick: "Upcoming Sick" }[f]}
-                                  </label>
-                                  <input
-                                    type="number" step="0.25" value={t[f]}
-                                    onChange={(e) => updateTimeOff(emp.id, f, e.target.value)}
-                                    className="w-full text-xs bg-white border border-slate-300 rounded px-1.5 py-1 text-center text-slate-900"
-                                  />
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                          <textarea
-                            value={note}
-                            onChange={(e) => updateNote(emp.id, e.target.value)}
-                            placeholder="Add a manager note to include in the email (optional)…"
-                            rows={2}
-                            className="w-full max-w-xl bg-white border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-900 resize-none"
+      <p className="text-xs mb-3" style={{ color: flaggedCount ? "#92400e" : "#0d7d5a" }}>
+        {flaggedCount} of {sorted.length} worth a look this {quarter}.
+      </p>
+
+      <div className="border border-slate-200 rounded-lg bg-white divide-y divide-slate-100 mb-3">
+        {sorted.map(({ emp, t, ev, pacing }) => {
+          const note = notes[emp.id] || "";
+          const emailText = buildPtoEmailText(emp, t, ev, note, quarter);
+          const isOpen = !!openDetails[emp.id];
+          const flagged = ev.tone !== "emerald";
+          const barColor = ev.tone === "amber" ? "#f59e0b" : ev.tone === "sky" ? "#2f7da5" : TH.teal;
+          return (
+            <div key={emp.id} className={`p-3.5 ${!flagged ? "opacity-75" : ""}`}>
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="w-32 shrink-0">
+                  <div className="text-sm font-medium text-slate-900 truncate">{emp.name}</div>
+                  <div className="text-xs font-mono text-slate-400">{ev.committedPto}d</div>
+                </div>
+                <PacingBar values={pacing.values} color={barColor} />
+                <div className="flex-1 min-w-[180px]">
+                  <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full mb-1 border ${PTO_TONE_CLASSES[ev.tone]}`}>
+                    {flagged && <AlertTriangle className="w-2.5 h-2.5" />} {ev.status}
+                  </span>
+                  <p className="text-[11px] text-slate-500 leading-snug">{ev.rec}</p>
+                  {ev.sickFlag && <p className={`text-[11px] mt-0.5 leading-snug ${ev.committedSick > SICK_GUIDELINE.max ? "text-rose-700" : "text-amber-700"}`}>{ev.sickFlag}</p>}
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    onClick={() => setOpenDetails((p) => ({ ...p, [emp.id]: !p[emp.id] }))}
+                    className="text-[11px] px-2 py-1 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 whitespace-nowrap"
+                  >
+                    {isOpen ? "▾ Edit" : "▸ Edit"}
+                  </button>
+                  <button
+                    onClick={() => copy(emp.id, emailText)}
+                    className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 whitespace-nowrap"
+                  >
+                    {copiedId === emp.id ? <><Check className="w-3 h-3" /> Copied</> : <><Copy className="w-3 h-3" /> Copy</>}
+                  </button>
+                </div>
+              </div>
+
+              {isOpen && (
+                <div className="mt-3 pt-3 border-t border-slate-100">
+                  <div className="mb-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-500 mb-1.5">Balances (days)</div>
+                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 max-w-xl">
+                      {["allPto", "allSick", "pastPto", "pastSick", "upcomingPto", "upcomingSick"].map((f) => (
+                        <div key={f}>
+                          <label className="block text-[9px] font-mono text-slate-400 mb-0.5">
+                            {{ allPto: "All PTO", allSick: "All Sick", pastPto: "Past PTO", pastSick: "Past Sick", upcomingPto: "Upcoming PTO", upcomingSick: "Upcoming Sick" }[f]}
+                          </label>
+                          <input
+                            type="number" step="0.25" value={t[f]}
+                            onChange={(e) => updateTimeOff(emp.id, f, e.target.value)}
+                            className="w-full text-xs bg-white border border-slate-300 rounded px-1.5 py-1 text-center text-slate-900"
                           />
                         </div>
-                      </td>
-                    </tr>
-                  )}
-                </React.Fragment>
-              );
-            })}
-          </tbody>
-        </table>
+                      ))}
+                    </div>
+                  </div>
+                  <textarea
+                    value={note}
+                    onChange={(e) => updateNote(emp.id, e.target.value)}
+                    placeholder="Add a manager note to include in the email (optional)…"
+                    rows={2}
+                    className="w-full max-w-xl bg-white border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-900 resize-none"
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
+      <p className="text-[11px] text-slate-400 mb-3">
+        Bars fade lighter → darker from Jan to now, built from actual logged Time Off entries (scaled to match each person's committed-PTO total) — so the shape of someone's pacing is visible alongside why they're flagged.
+      </p>
 
       {fallbackText && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setFallbackText(null)}>
@@ -3159,9 +3270,16 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
     const overall = qaOverallScore(ev, allTickets, allAvail, allQa);
     const label = qaOverallLabel(overall);
     const { highlights, improvements, coaching } = analyzeCaEval(ev, avgQaVal);
-    return { emp, empMonths, raw, ev, overall, label, highlights, improvements, coaching };
+    const qaHistoryKeys = Object.keys(empMonths).sort();
+    const qaHistory = qaHistoryKeys.map((m) => numOrNull(empMonths[m]?.qa));
+    const trendFlag = qaTrendFlag(qaHistory);
+    return { emp, empMonths, raw, ev, overall, label, highlights, improvements, coaching, qaHistoryKeys, qaHistory, trendFlag };
   });
   const sortedEvaluated = [...evaluated].sort((a, b) => {
+    // Trend-flagged people jump ahead of anyone without a current-month score or flag — a
+    // real slide is worth a look even before it shows up as a low percentile this month.
+    const aFlag = !!a.trendFlag, bFlag = !!b.trendFlag;
+    if (aFlag !== bFlag) return aFlag ? -1 : 1;
     if (a.overall == null && b.overall == null) return a.emp.name.localeCompare(b.emp.name);
     if (a.overall == null) return 1;
     if (b.overall == null) return -1;
@@ -3220,8 +3338,8 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        {sortedEvaluated.map(({ emp, empMonths, raw, ev, overall, label, highlights, improvements, coaching }) => {
+      <div className="border border-slate-200 rounded-lg bg-white divide-y divide-slate-100">
+        {sortedEvaluated.map(({ emp, empMonths, raw, ev, overall, label, highlights, improvements, coaching, qaHistory, trendFlag }) => {
           // Running average across every month this person has any entry for.
           const monthKeys = Object.keys(empMonths).sort();
           const avgField = (field) => {
@@ -3235,49 +3353,59 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
           }).length;
 
           const MetricTile = ({ metricKey, value, onChange, suffix, disabled }) => (
-            <div className={`rounded-lg border p-2 text-center ${metricTierClasses(metricKey, value, emp)}`}>
+            <div className={`rounded-lg border p-1.5 text-center ${metricTierClasses(metricKey, value, emp)}`}>
               <div className="flex items-center justify-center gap-0.5">
                 <input
                   type="number" step={metricKey === "tickets" ? "0.01" : "0.1"}
                   value={value ?? ""} onChange={onChange} disabled={disabled}
-                  className="w-12 bg-transparent text-lg font-bold text-center outline-none placeholder-current"
+                  className="w-11 bg-transparent text-sm font-bold text-center outline-none placeholder-current"
                   placeholder="—"
                 />
-                {value != null && suffix && <span className="text-xs font-semibold">{suffix}</span>}
+                {value != null && suffix && <span className="text-[10px] font-semibold">{suffix}</span>}
               </div>
-              <div className="text-[9px] font-mono uppercase tracking-wide opacity-70 mt-0.5">{METRIC_TILE_LABELS[metricKey]}</div>
+              <div className="text-[8px] font-mono uppercase tracking-wide opacity-70 mt-0.5">{METRIC_TILE_LABELS[metricKey]}</div>
             </div>
           );
 
           return (
-            <div key={emp.id} className="border border-slate-200 rounded-lg bg-white p-3.5 flex flex-col">
-              <div className="flex items-start justify-between gap-2 mb-2.5">
-                <div className="min-w-0">
+            <div key={emp.id} className="p-3.5">
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="min-w-0 w-36 shrink-0">
                   <div className="text-sm font-medium text-slate-900 truncate">{emp.name}</div>
                   <div className="text-[10px] text-slate-500 font-mono">{emp.team}</div>
                 </div>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium whitespace-nowrap shrink-0 ${QA_OVERALL_TONE[label.tone]}`}>{label.text.split(" · ")[0]}</span>
+
+                <QaSparkline values={qaHistory} color={trendFlag ? "#b45309" : label.tone === "needs" ? "#b91c1c" : TH.teal} />
+
+                <div className="grid grid-cols-4 gap-1.5 shrink-0">
+                  <MetricTile metricKey="tickets" value={ev.tickets} disabled={!!emp.ticketsExempt}
+                    onChange={(e) => updateQaEval(emp.id, selectedMonth, "tickets", e.target.value)} />
+                  <MetricTile metricKey="availablePct" value={ev.availablePct} suffix="%"
+                    onChange={(e) => updateQaEval(emp.id, selectedMonth, "availablePct", e.target.value)} />
+                  <MetricTile metricKey="acw" value={ev.acw} suffix="%"
+                    onChange={(e) => updateQaEval(emp.id, selectedMonth, "acw", e.target.value)} />
+                  <MetricTile metricKey="qa" value={ev.qa} suffix="%"
+                    onChange={(e) => updateQaEval(emp.id, selectedMonth, "qa", e.target.value)} />
+                </div>
+
+                <div className="flex-1 min-w-[140px]">
+                  <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-medium whitespace-nowrap ${QA_OVERALL_TONE[label.tone]}`}>{label.text.split(" · ")[0]}</span>
+                  {trendFlag && (
+                    <p className="text-[11px] text-amber-700 mt-1 leading-snug flex items-start gap-1">
+                      <TrendingDown className="w-3 h-3 mt-0.5 shrink-0" /> {trendFlag.text}
+                    </p>
+                  )}
+                </div>
               </div>
 
-              <div className="grid grid-cols-4 gap-1.5 mb-2.5">
-                <MetricTile metricKey="tickets" value={ev.tickets} disabled={!!emp.ticketsExempt}
-                  onChange={(e) => updateQaEval(emp.id, selectedMonth, "tickets", e.target.value)} />
-                <MetricTile metricKey="availablePct" value={ev.availablePct} suffix="%"
-                  onChange={(e) => updateQaEval(emp.id, selectedMonth, "availablePct", e.target.value)} />
-                <MetricTile metricKey="acw" value={ev.acw} suffix="%"
-                  onChange={(e) => updateQaEval(emp.id, selectedMonth, "acw", e.target.value)} />
-                <MetricTile metricKey="qa" value={ev.qa} suffix="%"
-                  onChange={(e) => updateQaEval(emp.id, selectedMonth, "qa", e.target.value)} />
-              </div>
-
-              <label className="flex items-center gap-1 mb-2 text-[10px] text-slate-500 cursor-pointer">
+              <label className="flex items-center gap-1 mt-2.5 mb-1 text-[10px] text-slate-500 cursor-pointer">
                 <input type="checkbox" checked={!!emp.ticketsExempt} onChange={(e) => updateEmployee(emp.id, "ticketsExempt", e.target.checked)} className="accent-teal-500" />
                 Project time — don't score tickets
               </label>
 
               <button
                 onClick={() => setOpenHistory((p) => ({ ...p, [emp.id]: !p[emp.id] }))}
-                className="text-[11px] text-teal-700 hover:text-teal-900 font-medium text-left mt-auto pt-1"
+                className="text-[11px] text-teal-700 hover:text-teal-900 font-medium text-left"
               >
                 {openHistory[emp.id] ? "▾ Hide details" : "▸ Details"}{monthsTracked > 0 ? ` (${monthsTracked}mo avg: ${runningAvg.qa != null ? runningAvg.qa.toFixed(0) + "% QA" : "—"})` : ""}
               </button>
@@ -3471,9 +3599,9 @@ function HolidaysTab({ holidays, nameOptions, updateHolidayField, updateMetric, 
   );
 }
 
-// Sorted least-covered first, generic single-color icon, plain coverage dot (no emoji, no %).
-// Click a row to expand it for full editing — team lead, volunteers, and the MOC/IB/orders/
-// urgents/faxes metrics that used to live in the spreadsheet table.
+// Sorted by nearest date first (soonest upcoming, or most-recently-past), no icon, plain
+// coverage dot. Click a row to expand it for full editing — team lead, volunteers, and the
+// MOC/IB/orders/urgents/faxes metrics that used to live in the spreadsheet table.
 function HolidayCoverageList({ holidays, title, muted, nameOptions, updateHolidayField, updateMetric, addVolunteer, removeVolunteer, updateVolunteer }) {
   const [openId, setOpenId] = useState(null);
   const [newVol, setNewVol] = useState({}); // holidayId -> { name, start, end }
@@ -3486,10 +3614,10 @@ function HolidayCoverageList({ holidays, title, muted, nameOptions, updateHolida
     setNewVol((p) => ({ ...p, [holidayId]: { name: "", start: "", end: "" } }));
   };
 
-  const sorted = [...holidays].sort((a, b) => {
-    const aNeeded = a.needed || DEFAULT_VOLUNTEERS_NEEDED, bNeeded = b.needed || DEFAULT_VOLUNTEERS_NEEDED;
-    return ((a.volunteers || []).length / aNeeded) - ((b.volunteers || []).length / bNeeded);
-  });
+  // Nearest date first either direction: soonest-upcoming for the Upcoming list, and this list
+  // already receives Past pre-sorted most-recent-first from HolidaysTab, so a plain ascending
+  // date sort here would reverse that — only re-sort when we're not in the muted/past list.
+  const sorted = muted ? holidays : [...holidays].sort((a, b) => a.date.localeCompare(b.date));
 
   return (
     <div className="mb-6">
@@ -3503,6 +3631,7 @@ function HolidayCoverageList({ holidays, title, muted, nameOptions, updateHolida
           const isOpen = openId === h.id;
           const nv = newVol[h.id] || { name: "", start: "", end: "" };
           const sc = holidayStatusColor(volunteers.length, needed);
+          const mocDone = !!h.metrics?.mocComplete;
           return (
             <div key={h.id} className="border rounded-lg overflow-hidden" style={{ borderColor: holidayBorderFor(volunteers.length, needed) }}>
               <button
@@ -3510,12 +3639,14 @@ function HolidayCoverageList({ holidays, title, muted, nameOptions, updateHolida
                 className="w-full flex items-center gap-3 px-3 py-2.5 text-left"
                 style={{ backgroundColor: holidayBgFor(volunteers.length, needed) }}
               >
-                <Gift className="w-6 h-6 shrink-0" style={{ color: HOLIDAY_ICON_COLOR }} />
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
                     {h.label}
                     {!muted && dleft >= 0 && dleft <= 45 && (
                       <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-amber-950 text-amber-300">{dleft}d</span>
+                    )}
+                    {muted && !mocDone && (
+                      <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">MOC pending</span>
                     )}
                   </div>
                   <div className="text-[11px] text-slate-500">{fmtDate(h.date)} · {volunteers.length} of {needed} volunteers</div>
@@ -3542,10 +3673,6 @@ function HolidayCoverageList({ holidays, title, muted, nameOptions, updateHolida
                         className="w-16 text-xs bg-white border border-slate-300 rounded px-2 py-1 text-slate-700"
                       />
                     </div>
-                    <label className="flex items-center gap-1.5 text-xs text-slate-600">
-                      <input type="checkbox" checked={!!h.metrics?.mocComplete} onChange={(e) => updateMetric(h.id, "mocComplete", e.target.checked)} className="accent-teal-600" />
-                      MOC complete
-                    </label>
                   </div>
 
                   <div className="space-y-1 mb-2">
@@ -3580,18 +3707,30 @@ function HolidayCoverageList({ holidays, title, muted, nameOptions, updateHolida
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-4 gap-1.5 pt-2 border-t border-slate-100">
-                    {METRIC_FIELDS.map((f) => (
-                      <div key={f}>
-                        <label className="block text-[9px] font-mono uppercase text-slate-400 mb-0.5">{f}</label>
-                        <input
-                          value={h.metrics?.[f] || ""}
-                          onChange={(e) => updateMetric(h.id, f, e.target.value.replace(/[^0-9]/g, ""))}
-                          placeholder="—"
-                          className="w-full text-center text-xs bg-white border border-slate-300 rounded px-1 py-1 text-slate-700 font-mono"
-                        />
-                      </div>
-                    ))}
+                  {/* MOC lives with the other post-holiday metrics now, not floating up top with
+                      team lead/volunteers-needed — it's one more thing to close out after the
+                      holiday, same as logging IB/orders/urgents/faxes. */}
+                  <div className="pt-2 border-t border-slate-100">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] font-mono uppercase text-slate-400">Post-holiday metrics</span>
+                      <label className="flex items-center gap-1.5 text-[11px] font-medium cursor-pointer" style={{ color: mocDone ? "#0d7d5a" : "#92400e" }}>
+                        <input type="checkbox" checked={mocDone} onChange={(e) => updateMetric(h.id, "mocComplete", e.target.checked)} className="accent-teal-600" />
+                        MOC {mocDone ? "complete" : "to complete"}
+                      </label>
+                    </div>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {METRIC_FIELDS.map((f) => (
+                        <div key={f}>
+                          <label className="block text-[9px] font-mono uppercase text-slate-400 mb-0.5">{f}</label>
+                          <input
+                            value={h.metrics?.[f] || ""}
+                            onChange={(e) => updateMetric(h.id, f, e.target.value.replace(/[^0-9]/g, ""))}
+                            placeholder="—"
+                            className="w-full text-center text-xs bg-white border border-slate-300 rounded px-1 py-1 text-slate-700 font-mono"
+                          />
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}
@@ -3634,7 +3773,8 @@ export default function ManagerSchedule() {
   const [newTdEmp, setNewTdEmp] = useState("");
   const [newTdDate, setNewTdDate] = useState("");
   const [newTdLabel, setNewTdLabel] = useState("Approved");
-  const [showPastGrid, setShowPastGrid] = useState(false);
+  const [twPageOffset, setTwPageOffset] = useState(0); // Time Off calendar: which 4-week page, 0 = week containing today
+  const [twExpandedDay, setTwExpandedDay] = useState(null); // date string — which day's detail panel is open
   const [undoStack, setUndoStack] = useState([]); // snapshots of `data` from right before each change, most recent last
   const [checkingLock, setCheckingLock] = useState(true);
   const [unlocked, setUnlocked] = useState(false);
@@ -4471,10 +4611,11 @@ export default function ManagerSchedule() {
 
           <div className="mb-8">
             {(() => {
-                const allGridDates = Array.from(new Set([...dates, ...datesThroughEOY(), ...(data.timeOffDates || []).map((e) => e.date)])).sort();
-                const pastGridDates = allGridDates.filter((d) => d < todayISO);
-                const upcomingGridDates = allGridDates.filter((d) => d >= todayISO);
-                const visibleGridDates = showPastGrid ? allGridDates : upcomingGridDates;
+                const windowDates = timeOffWindowDates(twPageOffset);
+                const windowStart = windowDates[0];
+                const windowEnd = windowDates[windowDates.length - 1];
+                const entriesBeforeWindow = (data.timeOffDates || []).filter((e) => e.date < windowStart).length;
+                const entriesAfterWindow = (data.timeOffDates || []).filter((e) => e.date > windowEnd).length;
                 const startQuickAdd = (d, empId) => {
                   setLogTimeOff(empId); setLogDate(d); setLogType("PTO"); setLogScope("allday");
                   setLogStart("09:00"); setLogEnd("17:00"); setLogHours("8"); setLogCoveredBy(""); setLogComment("");
@@ -4482,68 +4623,110 @@ export default function ManagerSchedule() {
                 };
                 return (
                   <>
-                    {pastGridDates.length > 0 && (
-                      <button
-                        onClick={() => setShowPastGrid((v) => !v)}
-                        className="flex items-center gap-1 text-xs px-2.5 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50 mb-3 font-medium"
-                      >
-                        {showPastGrid ? "▾" : "▸"} {showPastGrid ? "Hide" : "Show"} {pastGridDates.length} past date{pastGridDates.length === 1 ? "" : "s"}
-                      </button>
-                    )}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
-                      {visibleGridDates.map((d) => {
+                    <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => { setTwPageOffset((o) => o - 1); setTwExpandedDay(null); }}
+                          className="p-1 rounded border border-slate-300 text-slate-500 hover:bg-slate-50"
+                          title="Previous 4 weeks"
+                        >
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                        </button>
+                        <span className="text-xs font-semibold text-slate-700 font-mono">
+                          {fmtDate(windowStart)} – {fmtDate(windowEnd)}
+                        </span>
+                        <button
+                          onClick={() => { setTwPageOffset((o) => o + 1); setTwExpandedDay(null); }}
+                          className="p-1 rounded border border-slate-300 text-slate-500 hover:bg-slate-50"
+                          title="Next 4 weeks"
+                        >
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
+                        {twPageOffset !== 0 && (
+                          <button
+                            onClick={() => { setTwPageOffset(0); setTwExpandedDay(null); }}
+                            className="text-[11px] px-2 py-1 rounded border border-slate-300 text-teal-700 hover:bg-teal-50 font-medium"
+                          >
+                            Today
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 text-[11px]">
+                        {entriesBeforeWindow > 0 && (
+                          <button
+                            onClick={() => { setTwPageOffset((o) => o - 1); setTwExpandedDay(null); }}
+                            className="flex items-center gap-0.5 text-slate-500 hover:text-teal-700 font-medium"
+                          >
+                            <ChevronLeft className="w-3 h-3" /> {entriesBeforeWindow} earlier logged
+                          </button>
+                        )}
+                        {entriesAfterWindow > 0 && (
+                          <button
+                            onClick={() => { setTwPageOffset((o) => o + 1); setTwExpandedDay(null); }}
+                            className="flex items-center gap-0.5 text-slate-500 hover:text-teal-700 font-medium"
+                          >
+                            {entriesAfterWindow} later logged <ChevronRight className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
+                      {windowDates.map((d) => {
                         const entries = (data.timeOffDates || []).filter((e) => e.date === d);
                         const peopleOut = tdPeopleByDate[d] ? tdPeopleByDate[d].size : 0;
-                        const overlap = peopleOut >= 2;
+                        const dot = timeOffCoverageDot(peopleOut);
                         const isPast = d < todayISO;
+                        const isToday = d === todayISO;
+                        const weekend = [0, 6].includes(new Date(d + "T00:00:00").getDay());
+                        const isExpanded = twExpandedDay === d;
                         return (
-                          <div
-                            key={d}
-                            className={`relative border rounded-lg p-2 min-h-[92px] group/cell ${overlap ? "border-amber-200 bg-amber-50/50" : isPast ? "border-slate-100 bg-slate-50/50" : "border-slate-200 bg-white"}`}
-                          >
-                            <div className="flex items-center justify-between mb-1.5">
-                              <span className={`text-[11px] font-mono font-semibold ${isPast ? "text-slate-400" : "text-slate-700"}`}>{fmtDate(d)}</span>
-                              <button
-                                onClick={() => setCalAddFor((cur) => (cur === d ? null : d))}
-                                className="text-slate-300 hover:text-teal-700 opacity-0 group-hover/cell:opacity-100 transition-opacity leading-none"
+                          <div key={d} className="relative">
+                            <button
+                              onClick={() => setTwExpandedDay((cur) => (cur === d ? null : d))}
+                              className={`relative w-full text-left rounded-xl p-2.5 min-h-[100px] group/cell transition-colors border ${
+                                isExpanded ? "border-teal-500 bg-teal-50/60" :
+                                weekend ? "border-slate-100 bg-slate-50/60" :
+                                isPast ? "border-slate-100 bg-slate-50/40" :
+                                "border-slate-200 bg-white"
+                              } ${isToday ? "ring-1 ring-teal-400" : ""}`}
+                            >
+                              <div className="flex items-center justify-between mb-1.5">
+                                <span className={`text-[11px] font-mono font-semibold ${isPast ? "text-slate-400" : "text-slate-700"}`}>{fmtDate(d)}</span>
+                                {dot && (
+                                  <span className="flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: dot.color }} />
+                                    <span className="text-[10px] font-semibold" style={{ color: dot.color }}>{peopleOut}</span>
+                                  </span>
+                                )}
+                              </div>
+                              {entries.length === 0 ? (
+                                <div className="text-[11px] text-slate-300 italic">—</div>
+                              ) : (
+                                <div className="space-y-1">
+                                  {entries.slice(0, 3).map((entry) => {
+                                    const emp = employees.find((e) => e.id === entry.empId);
+                                    const ec = timeOffEntryColor(entry.label);
+                                    return (
+                                      <div key={entry.id} className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded truncate" style={{ backgroundColor: ec.bg, color: ec.text }}>
+                                        <span className="truncate">{emp ? emp.name.split(" ")[0] : entry.empId}</span>
+                                        {entry.comment && <MessageSquare className="w-2.5 h-2.5 shrink-0 opacity-60" />}
+                                      </div>
+                                    );
+                                  })}
+                                  {entries.length > 3 && (
+                                    <div className="text-[10px] font-medium text-slate-500">+{entries.length - 3} more</div>
+                                  )}
+                                </div>
+                              )}
+                              <span
+                                onClick={(e) => { e.stopPropagation(); setCalAddFor((cur) => (cur === d ? null : d)); }}
+                                className="absolute top-2 right-2 text-slate-300 hover:text-teal-700 opacity-0 group-hover/cell:opacity-100 transition-opacity leading-none"
                                 title="Log time off for this day"
                               >
                                 <Plus className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                            <div className="space-y-1">
-                              {entries.map((entry) => {
-                                const emp = employees.find((e) => e.id === entry.empId);
-                                // The hours/whole-day-vs-specific detail lives on the linked Schedule
-                                // cell, not on the time-off entry itself.
-                                const linkedCell = cells[cellKey(entry.empId, entry.date)];
-                                const isPartial = linkedCell && linkedCell.statusScope === "partial" && linkedCell.statusStart && linkedCell.statusEnd;
-                                const timeDetail = isPartial
-                                  ? formatRange12h(linkedCell.statusStart, linkedCell.statusEnd)
-                                  : linkedCell && linkedCell.hours
-                                    ? `Whole day (${linkedCell.hours}h)`
-                                    : "Whole day";
-                                const ec = timeOffEntryColor(entry.label);
-                                return (
-                                  <div key={entry.id} className="relative group">
-                                    <div className="flex items-center justify-between gap-1 text-[10px] px-1.5 py-0.5 rounded" style={{ backgroundColor: ec.bg, color: ec.text }}>
-                                      <span className="truncate">
-                                        {emp ? emp.name.split(" ")[0] : entry.empId}
-                                        {isPartial && <span className="opacity-70"> · {timeDetail}</span>}
-                                      </span>
-                                      <button onClick={() => removeTimeOffDate(entry.id)} className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0" style={{ color: ec.text }}>
-                                        <X className="w-2.5 h-2.5" />
-                                      </button>
-                                    </div>
-                                    <div className="absolute z-30 hidden group-hover:block bottom-full left-0 mb-1 whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1.5 rounded shadow-lg pointer-events-none max-w-[220px]">
-                                      <div className="font-semibold">{emp ? emp.name : entry.empId} — {entry.label}</div>
-                                      <div className="text-slate-300">{fmtDate(d)} · {timeDetail}</div>
-                                      {entry.comment && <div className="text-slate-300 mt-0.5 whitespace-normal">"{entry.comment}"</div>}
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
+                              </span>
+                            </button>
 
                             {calAddFor === d && (
                               <div className="absolute left-0 right-0 top-full mt-1 z-20 bg-white border border-slate-300 rounded-lg shadow-lg p-1.5 max-h-40 overflow-y-auto">
@@ -4562,6 +4745,52 @@ export default function ManagerSchedule() {
                         );
                       })}
                     </div>
+
+                    {twExpandedDay && (() => {
+                      const dayEntries = (data.timeOffDates || []).filter((e) => e.date === twExpandedDay);
+                      return (
+                        <div className="mt-3 rounded-xl border border-teal-500 bg-white p-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="text-sm font-semibold text-slate-800">{fmtDateLong(twExpandedDay)}</div>
+                            <button onClick={() => setTwExpandedDay(null)} className="text-slate-400 hover:text-slate-700">
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                          {dayEntries.length === 0 ? (
+                            <div className="text-xs text-slate-500">Nobody logged out this day.</div>
+                          ) : (
+                            <div className="space-y-2">
+                              {dayEntries.map((entry) => {
+                                const emp = employees.find((e) => e.id === entry.empId);
+                                const linkedCell = cells[cellKey(entry.empId, entry.date)];
+                                const isPartial = linkedCell && linkedCell.statusScope === "partial" && linkedCell.statusStart && linkedCell.statusEnd;
+                                const timeDetail = isPartial
+                                  ? formatRange12h(linkedCell.statusStart, linkedCell.statusEnd)
+                                  : linkedCell && linkedCell.hours
+                                    ? `Whole day (${linkedCell.hours}h)`
+                                    : "Whole day";
+                                const ec = timeOffEntryColor(entry.label);
+                                return (
+                                  <div key={entry.id} className="flex items-start justify-between gap-3 pb-2 border-b border-slate-100 last:border-b-0">
+                                    <div>
+                                      <div className="text-[13px] font-medium text-slate-800">{emp ? emp.name : entry.empId}</div>
+                                      <div className="text-[11px] text-slate-500 mt-0.5">{timeDetail}</div>
+                                      {entry.comment && <div className="text-[11px] text-slate-500 mt-1 italic">"{entry.comment}"</div>}
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <span className="text-[10px] px-2 py-0.5 rounded font-medium" style={{ backgroundColor: ec.bg, color: ec.text }}>{entry.label}</span>
+                                      <button onClick={() => removeTimeOffDate(entry.id)} className="text-slate-300 hover:text-rose-600">
+                                        <X className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </>
                 );
               })()}
@@ -4594,6 +4823,7 @@ export default function ManagerSchedule() {
         <PtoEvalTab
           employees={employees.filter((e) => !e.partTime)}
           timeOff={timeOff}
+          timeOffDates={data.timeOffDates || []}
           notes={data.ptoEvalNotes || {}}
           updateNote={updatePtoNote}
           updateTimeOff={updateTimeOff}
