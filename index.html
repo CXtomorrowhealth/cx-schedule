@@ -1701,6 +1701,7 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
   const ibHourlyStats = (date, hour) => {
     const hourStart = hour * 60, hourEnd = (hour + 1) * 60;
     let working = 0, onIb = 0;
+    const ibNames = [], workingOnlyNames = [];
     employees.forEach((emp) => {
       const c = cells[cellKey(emp.id, date)];
       const workingWindows = employeeWorkingWindows(c, emp.shiftStart, emp.shiftEnd);
@@ -1713,11 +1714,12 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
       const shiftStart = (c && c.shiftStart) || emp.shiftStart;
       const shiftEnd = (c && c.shiftEnd) || emp.shiftEnd;
       const ibWindows = ibTaskWindows(c, shiftStart, shiftEnd);
-      if (ibWindows.length === 0) return;
+      if (ibWindows.length === 0) { workingOnlyNames.push(emp.name); return; }
       const ibMinutes = intersectWindowsToMinutes(workingWindows, ibWindows);
-      if (ibMinutes.some(([s, e]) => s < hourEnd && e > hourStart)) onIb += 1;
+      if (ibMinutes.some(([s, e]) => s < hourEnd && e > hourStart)) { onIb += 1; ibNames.push(emp.name); }
+      else workingOnlyNames.push(emp.name);
     });
-    return { working, onIb, pct: working > 0 ? Math.round((onIb / working) * 100) : 0 };
+    return { working, onIb, pct: working > 0 ? Math.round((onIb / working) * 100) : 0, ibNames, workingOnlyNames };
   };
 
   // ── Redesigned overview below: KPI cards + a cleaner hoverable heatmap, all built from the
@@ -1787,11 +1789,17 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
                         : singleCoverage
                           ? (covered ? TH.teal : "#e0685a")
                           : ibCoverageColor(stats.pct);
+                      const namesPart = stats.ibNames.length
+                        ? ` — on IB: ${stats.ibNames.join(", ")}`
+                        : "";
+                      const othersPart = stats.workingOnlyNames.length
+                        ? ` · working (not IB): ${stats.workingOnlyNames.join(", ")}`
+                        : "";
                       const detail = stats.working === 0
                         ? `${fmtDate(d)} ${fmtHourMark(hr)} — nobody on shift`
                         : singleCoverage
-                          ? `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.onIb}/${stats.working} on IB (just needs 1)`
-                          : `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.pct}% (${stats.onIb}/${stats.working} on IB)`;
+                          ? `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.onIb}/${stats.working} on IB (just needs 1)${namesPart}${othersPart}`
+                          : `${fmtDate(d)} ${fmtHourMark(hr)} — ${stats.pct}% (${stats.onIb}/${stats.working} on IB)${namesPart}${othersPart}`;
                       return (
                         <td key={d} className="p-0.5">
                           <div
@@ -1809,15 +1817,13 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
             </tbody>
           </table>
         </div>
-        <div className="flex items-center justify-between mt-2 flex-wrap gap-2">
-          <div className="flex items-center gap-3 text-[10px] text-slate-400">
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(40) }} /> 33%+ (target)</span>
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(26) }} /> 20-33%</span>
-            <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(10) }} /> Under 20%</span>
-            <span className="flex items-center gap-1 ml-2"><span className="text-slate-300">·1</span> = just needs 1 person (8-9am, 5-8pm)</span>
-          </div>
-          <span className="text-[11px] font-mono text-slate-500 h-4">{hoveredCell || "hover a cell for detail"}</span>
+        <div className="flex items-center gap-3 text-[10px] text-slate-400 mt-2 flex-wrap">
+          <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(40) }} /> 33%+ (target)</span>
+          <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(26) }} /> 20-33%</span>
+          <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded" style={{ backgroundColor: ibCoverageColor(10) }} /> Under 20%</span>
+          <span className="flex items-center gap-1 ml-2"><span className="text-slate-300">·1</span> = just needs 1 person (8-9am, 5-8pm)</span>
         </div>
+        <div className="text-[11px] font-mono text-slate-500 mt-1.5 min-h-[14px]">{hoveredCell || "hover a cell for detail"}</div>
       </div>
     </div>
   );
