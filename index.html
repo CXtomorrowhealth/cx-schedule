@@ -4829,14 +4829,53 @@ export default function ManagerSchedule() {
     const nextWeekdays = has ? rule.weekdays.filter((d) => d !== weekday) : [...rule.weekdays, weekday].sort();
     updateStandingCoverage(ruleId, "weekdays", nextWeekdays);
   };
-  // Manually fills a single day's gap (e.g. the default assignee was out) onto whoever's
-  // actually covering, without touching the rule's default assignee going forward.
+  // Fills (or reassigns) a single day's standing-coverage slot — e.g. "After Hours Coverage"
+  // when the usual person is out. This is deliberately its own mechanism, separate from the
+  // "Covered by" field on someone's OOO block: a standing role needs filling every day
+  // regardless of who's normally on it or why they're out, so it shouldn't depend on round-
+  // tripping through another person's absence record. Creates a real Working block too, if the
+  // window falls outside the assignee's normal shift — not just a task label.
   const assignCoverageForDate = (rule, date, empId) => {
     if (!empId) return;
+    const tid = `sc-${rule.id}-${date}`;
+    const bid = `scblk-${rule.id}-${date}`;
+    const ruleEmp = employees.find((e) => e.id === rule.assigneeId);
+    const coveringFor = ruleEmp && ruleEmp.id !== empId ? ruleEmp.name.split(" ")[0] : null;
+    let nextCells = { ...cells };
+
+    // Move the slot off anyone else who currently has it (reassignment).
+    employees.forEach((e) => {
+      if (e.id === empId) return;
+      const k = cellKey(e.id, date);
+      const c = nextCells[k];
+      if (!c) return;
+      const hasSlot = (c.tasks || []).some((t) => t.id === tid || (t.name === rule.label && t.start === rule.start && t.end === rule.end));
+      if (!hasSlot) return;
+      const nextTasks = (c.tasks || []).filter((t) => !(t.id === tid || (t.name === rule.label && t.start === rule.start && t.end === rule.end)));
+      const patch = { tasks: nextTasks };
+      if (Array.isArray(c.blocks) && c.blocks.some((b) => b.id === bid)) {
+        const nextBlocks = c.blocks.filter((b) => b.id !== bid);
+        Object.assign(patch, { blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) });
+      }
+      nextCells[k] = { ...c, ...patch };
+    });
+
     const key = cellKey(empId, date);
-    const cell = cells[key] || emptyCell();
-    if ((cell.tasks || []).some((t) => t.name === rule.label && t.start === rule.start && t.end === rule.end)) return;
-    const nextCells = { ...cells, [key]: { ...cell, tasks: [...(cell.tasks || []), { id: `sc-${rule.id}-${date}-manual`, name: rule.label, scope: "partial", start: rule.start, end: rule.end }] } };
+    const cell = nextCells[key] || emptyCell();
+    const task = { id: tid, name: rule.label, ...(coveringFor ? { coveringFor } : {}), scope: "partial", start: rule.start, end: rule.end };
+    const nextTasks = [...(cell.tasks || []).filter((t) => t.id !== tid), task];
+    let patch = { tasks: nextTasks };
+    const existingBlocks = getCellBlocks(cell, employees.find((e) => e.id === empId)?.shiftStart, employees.find((e) => e.id === empId)?.shiftEnd).map((b) => ({ ...b }));
+    const alreadyWorking = existingBlocks.some((b) => b.id !== bid && b.type === "Working" && b.start && b.end && toMinutes(b.start) <= toMinutes(rule.start) && toMinutes(b.end) >= toMinutes(rule.end));
+    if (!alreadyWorking) {
+      const newBlock = { id: bid, type: "Working", start: rule.start, end: rule.end, ...(coveringFor ? { coverageLabel: rule.label, coveringFor } : {}) };
+      const bIdx = existingBlocks.findIndex((b) => b.id === bid);
+      const nextBlocks = bIdx >= 0
+        ? existingBlocks.map((b, i) => (i === bIdx ? newBlock : b))
+        : (existingBlocks.length === 1 && existingBlocks[0].type === "NotScheduled" ? [newBlock] : [...existingBlocks, newBlock]);
+      patch = { tasks: nextTasks, blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) };
+    }
+    nextCells[key] = { ...cell, ...patch };
     persist({ ...data, cells: nextCells, updatedAt: Date.now() });
   };
 
