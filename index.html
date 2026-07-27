@@ -236,7 +236,8 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
           {dates.map((d) => {
             const info = dayInfo(d);
             const dateObj = new Date(d + "T00:00:00");
-            const allTasks = info.hasTasks ? sortTasksForDisplay(info.c.tasks) : [];
+            const shownOnBar = new Set(info.blocks.filter((b) => b.coverageLabel).map((b) => `${b.coverageLabel}::${b.coveringFor}::${b.start}::${b.end}`));
+            const allTasks = info.hasTasks ? sortTasksForDisplay(info.c.tasks).filter((t) => !(t.coveringFor && shownOnBar.has(`${t.name}::${t.coveringFor}::${t.start}::${t.end}`))) : [];
             return (
               <div key={d} className={`flex items-start gap-4 p-4 ${info.today ? "bg-teal-50" : info.showAsWeekend ? "bg-slate-50/60" : ""}`}>
                 <div className="w-16 shrink-0 pt-0.5 text-center">
@@ -253,7 +254,9 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
                     <div className="space-y-1">
                       {info.blocks.filter((b) => b.start && b.end).map((b, i) => (
                         <div key={i} className="text-sm font-medium text-slate-800">
-                          {b.type === "Working" ? formatRange12h(b.start, b.end) : `${blockLabel(b.type)} · ${formatRange12h(b.start, b.end)}`}
+                          {b.coverageLabel
+                            ? `${b.coverageLabel}${b.coveringFor ? ` · covering ${b.coveringFor}` : ""} · ${formatRange12h(b.start, b.end)}`
+                            : b.type === "Working" ? formatRange12h(b.start, b.end) : `${blockLabel(b.type)} · ${formatRange12h(b.start, b.end)}`}
                         </div>
                       ))}
                     </div>
@@ -269,7 +272,7 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
                     <div className="flex flex-wrap gap-1.5 mt-2">
                       {allTasks.map((t) => (
                         <span key={t.id} className={`text-[11px] px-2 py-0.5 rounded-full border whitespace-nowrap ${taskColor(t.name)}`}>
-                          {t.name}{t.payer ? ` (${t.payer})` : ""}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""}{t.scope === "partial" && t.start && t.end ? ` · ${formatRange12h(t.start, t.end)}` : ""}
+                          {t.name}{t.payer ? ` (${t.payer})` : ""}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""}{chipTimeSuffix(t, info.blocks)}
                         </span>
                       ))}
                     </div>
@@ -577,19 +580,27 @@ function ensureCoverageSync(dataObj) {
       const end = b.coveredByEnd || b.end || "";
       const reason = coverageReasonLabel(cell.tasks, b.type, start, end);
       const coveringFor = (sourceEmp.name || "").split(" ")[0];
-      const existing = (coCell.tasks || []).find((t) => t.id === tid);
-      if (existing && existing.name === reason && existing.coveringFor === coveringFor) return; // already synced with the current reason
+      const existingTask = (coCell.tasks || []).find((t) => t.id === tid);
+      const coBlocksAll = partial && start && end ? getCellBlocks(coCell, coEmp.shiftStart, coEmp.shiftEnd).map((cb) => ({ ...cb })) : [];
+      const existingBlock = coBlocksAll.find((cb) => cb.id === bid);
+      const taskInSync = existingTask && existingTask.name === reason && existingTask.coveringFor === coveringFor;
+      const blockInSync = !existingBlock || (existingBlock.coverageLabel === reason && existingBlock.coveringFor === coveringFor);
+      if (taskInSync && blockInSync) return; // already synced with the current reason
       changed = true;
       const task = { id: tid, name: reason, coveringFor, scope: partial ? "partial" : "allday", start: partial ? start : "", end: partial ? end : "" };
-      const nextTasks = existing ? (coCell.tasks || []).map((t) => (t.id === tid ? task : t)) : [...(coCell.tasks || []), task];
+      const nextTasks = existingTask ? (coCell.tasks || []).map((t) => (t.id === tid ? task : t)) : [...(coCell.tasks || []), task];
       let patch = { tasks: nextTasks };
       if (partial && start && end) {
-        const coBlocks = getCellBlocks(coCell, coEmp.shiftStart, coEmp.shiftEnd).map((cb) => ({ ...cb }));
-        const alreadyWorking = coBlocks.some((cb) => cb.type === "Working" && cb.start && cb.end && toMinutes(cb.start) <= toMinutes(start) && toMinutes(cb.end) >= toMinutes(end));
+        const alreadyWorking = coBlocksAll.some((cb) => cb.id !== bid && cb.type === "Working" && cb.start && cb.end && toMinutes(cb.start) <= toMinutes(start) && toMinutes(cb.end) >= toMinutes(end));
         if (!alreadyWorking) {
-          const nextBlocks = (coBlocks.length === 1 && coBlocks[0].type === "NotScheduled")
-            ? [{ id: bid, type: "Working", start, end }]
-            : [...coBlocks, { id: bid, type: "Working", start, end }];
+          const taggedBlock = { id: bid, type: "Working", start, end, coverageLabel: reason, coveringFor };
+          const bIdx = coBlocksAll.findIndex((cb) => cb.id === bid);
+          const nextBlocks = bIdx >= 0
+            ? coBlocksAll.map((cb, i) => (i === bIdx ? taggedBlock : cb))
+            : (coBlocksAll.length === 1 && coBlocksAll[0].type === "NotScheduled" ? [taggedBlock] : [...coBlocksAll, taggedBlock]);
+          patch = { tasks: nextTasks, blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) };
+        } else if (existingBlock) {
+          const nextBlocks = coBlocksAll.filter((cb) => cb.id !== bid);
           patch = { tasks: nextTasks, blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) };
         }
       }
@@ -1154,6 +1165,16 @@ function sortTasksForDisplay(tasks) {
     return (a.name || "").localeCompare(b.name || "");
   });
 }
+// A skill or coverage chip's hours are only worth printing when they're not just restating the
+// shift bar above it — e.g. "Weekend Coverage 10am-6:30pm" when that IS the whole shift is
+// redundant. Only shows the range when it's a genuinely narrower/different window.
+function chipTimeSuffix(t, blocks) {
+  if (!(t.scope === "partial" && t.start && t.end)) return "";
+  const matchesShift = (blocks || []).some((b) => b.type === "Working" && b.start === t.start && b.end === t.end);
+  if (matchesShift) return "";
+  return ` · ${formatRange12h(t.start, t.end)}`;
+}
+
 function taskColor(rawTag) {
   const key = rawTag.trim().toLowerCase().replace(/\([^)]*\)/g, "").replace(/[-–].*$/, "").trim();
   if (KNOWN_TASK_COLORS[key]) return KNOWN_TASK_COLORS[key];
@@ -1430,7 +1451,7 @@ function DayBlocksBar({ blocks, workingColor, height = "h-7" }) {
         return (
           <div key={b.id || i} style={{ left: `${left}%`, width: `${width}%`, backgroundColor: color, ...blockStripe(b.type, color) }}
             className="absolute inset-y-0 flex items-center justify-center gap-1 text-[10px] font-medium text-white px-1 whitespace-nowrap overflow-hidden"
-            title={`${blockLabel(b.type)} · ${formatRange12h(b.start, b.end)}${b.coveredBy ? ` · covered by ${coveredByLabel(b)}` : ""}`}
+            title={`${b.coverageLabel || blockLabel(b.type)}${b.coveringFor ? ` · covering ${b.coveringFor}` : ""} · ${formatRange12h(b.start, b.end)}${b.coveredBy ? ` · covered by ${coveredByLabel(b)}` : ""}`}
           >
             {Icon && <Icon className="w-3 h-3 shrink-0" />}
             <span className="truncate">
@@ -1545,11 +1566,12 @@ function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, 
                     // bars use — not the container edge, and not centered.
                     const blockStarts = blocks.map((b) => b.start).filter(Boolean).map(toMinutes);
                     const rowLeftPct = blockStarts.length ? pctOfDay(Math.min(...blockStarts)) : 0;
+                    if (allTasks.length === 0) return null;
                     return (
                       <div className="flex flex-wrap gap-1 mt-1.5" style={{ marginLeft: `${rowLeftPct}%` }}>
                         {allTasks.map((t) => (
                           <span key={t.id} className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${taskColor(t.name)}`}>
-                            {t.name}{t.payer ? ` (${t.payer})` : ""}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""}{t.scope === "partial" && t.start && t.end ? ` · ${formatRange12h(t.start, t.end)}` : ""}
+                            {t.name}{t.payer ? ` (${t.payer})` : ""}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""}{chipTimeSuffix(t, blocks)}
                           </span>
                         ))}
                       </div>
@@ -4425,7 +4447,7 @@ export default function ManagerSchedule() {
         if (alreadyWorking) {
           if (bi >= 0) blocks.splice(bi, 1); // their normal shift already covers this window
         } else {
-          const newBlock = { id: bid, type: "Working", start, end };
+          const newBlock = { id: bid, type: "Working", start, end, coverageLabel: name, coveringFor };
           if (bi >= 0) blocks[bi] = newBlock;
           else if (blocks.length === 1 && blocks[0].type === "NotScheduled") blocks.splice(0, 1, newBlock);
           else blocks.push(newBlock);
