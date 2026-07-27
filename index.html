@@ -535,6 +535,59 @@ function ensureStandingCoverageTasks(dataObj) {
   return { data: { ...dataObj, cells: nextCells, updatedAt: Date.now() }, changed: true };
 }
 
+// Backfill: "Covered by" sync (the task label + Working block on the covering person's own
+// schedule) only runs when a block is actually edited. Any "Covered by" set before this feature
+// existed, or set and then never touched again, never got synced. This scans every cell once,
+// finds any block with a coveredBy that's missing its matching task on the covering person's
+// side, and adds it — same logic as the live sync, just applied retroactively across all data.
+function ensureCoverageSync(dataObj) {
+  const employees = dataObj.employees || [];
+  const empByName = {}; employees.forEach((e) => { empByName[e.name] = e; });
+  const empById = {}; employees.forEach((e) => { empById[e.id] = e; });
+  const cells = { ...dataObj.cells };
+  let changed = false;
+
+  Object.keys(dataObj.cells || {}).forEach((key) => {
+    const sepIdx = key.indexOf("::");
+    const empId = key.slice(0, sepIdx), date = key.slice(sepIdx + 2);
+    const sourceEmp = empById[empId];
+    const cell = dataObj.cells[key];
+    if (!sourceEmp || !cell) return;
+    const blocks = getCellBlocks(cell, sourceEmp.shiftStart, sourceEmp.shiftEnd);
+    blocks.forEach((b) => {
+      if (!b.coveredBy) return;
+      const coEmp = empByName[b.coveredBy];
+      if (!coEmp) return;
+      const tid = `cov-${empId}-${b.id}`;
+      const bid = `covblk-${empId}-${b.id}`;
+      const coKey = cellKey(coEmp.id, date);
+      const coCell = cells[coKey] || emptyCell();
+      if ((coCell.tasks || []).some((t) => t.id === tid)) return; // already synced
+      changed = true;
+      const partial = !!(b.coveredByStart && b.coveredByEnd) || !!(b.start && b.end);
+      const start = b.coveredByStart || b.start || "";
+      const end = b.coveredByEnd || b.end || "";
+      const task = { id: tid, name: `Covering ${(sourceEmp.name || "").split(" ")[0]} (${b.type})`, scope: partial ? "partial" : "allday", start: partial ? start : "", end: partial ? end : "" };
+      const nextTasks = [...(coCell.tasks || []), task];
+      let patch = { tasks: nextTasks };
+      if (partial && start && end) {
+        const coBlocks = getCellBlocks(coCell, coEmp.shiftStart, coEmp.shiftEnd).map((cb) => ({ ...cb }));
+        const alreadyWorking = coBlocks.some((cb) => cb.type === "Working" && cb.start && cb.end && toMinutes(cb.start) <= toMinutes(start) && toMinutes(cb.end) >= toMinutes(end));
+        if (!alreadyWorking) {
+          const nextBlocks = (coBlocks.length === 1 && coBlocks[0].type === "NotScheduled")
+            ? [{ id: bid, type: "Working", start, end }]
+            : [...coBlocks, { id: bid, type: "Working", start, end }];
+          patch = { tasks: nextTasks, blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) };
+        }
+      }
+      cells[coKey] = { ...coCell, ...patch };
+    });
+  });
+
+  if (!changed) return { data: dataObj, changed: false };
+  return { data: { ...dataObj, cells, updatedAt: Date.now() }, changed: true };
+}
+
 // Weekly cleanup: on Tuesdays only, move any date older than this week's Monday (and its
 // cells) out of the live `dates`/`cells` — into `scheduleArchive` instead of deleting them —
 // so the live app stays lean but nothing is actually lost. Doesn't touch this week or next —
@@ -4044,7 +4097,9 @@ export default function ManagerSchedule() {
           parsed = commentsBackfilled.data;
           const scFilled = ensureStandingCoverageTasks(parsed);
           parsed = scFilled.data;
-          if (pruned.changed || filled.changed || pinned.changed || emailed.changed || exempted.changed || qaMonthly.changed || commentsBackfilled.changed || scFilled.changed) await storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
+          const coverageSynced = ensureCoverageSync(parsed);
+          parsed = coverageSynced.data;
+          if (pruned.changed || filled.changed || pinned.changed || emailed.changed || exempted.changed || qaMonthly.changed || commentsBackfilled.changed || scFilled.changed || coverageSynced.changed) await storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
         }
         setData(parsed);
       } else if (!isPoll) {
