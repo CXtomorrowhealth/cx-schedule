@@ -877,14 +877,15 @@ function getCellBlocks(cell, empShiftStart, empShiftEnd) {
   // PTO is folded into OOO here — the block-type picker no longer offers PTO as a separate
   // choice, so any older day still tagged PTO just opens as OOO instead of a dangling value.
   const statusType = cell.status === "PTO" ? "OOO" : cell.status;
+  const coverageFields = cell.coveredBy ? { coveredBy: cell.coveredBy, coveredByStart: cell.coveredByStart || "", coveredByEnd: cell.coveredByEnd || "" } : {};
   if (cell.statusScope === "partial" && cell.statusStart && cell.statusEnd) {
     const working = subtractInterval(shiftStart, shiftEnd, cell.statusStart, cell.statusEnd);
     return [
-      { id: "b0", type: statusType, start: cell.statusStart, end: cell.statusEnd },
+      { id: "b0", type: statusType, start: cell.statusStart, end: cell.statusEnd, ...coverageFields },
       ...working.map(([s, e], i) => ({ id: `w${i}`, type: "Working", start: s, end: e })),
     ];
   }
-  return [{ id: "b0", type: statusType, start: "", end: "" }];
+  return [{ id: "b0", type: statusType, start: "", end: "", ...coverageFields }];
 }
 
 // The inverse: boils an arbitrary block list back down into the older single-status fields, so
