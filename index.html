@@ -255,7 +255,7 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
                       {info.blocks.filter((b) => b.start && b.end).map((b, i) => (
                         <div key={i} className="text-sm font-medium text-slate-800">
                           {b.coverageLabel
-                            ? `${b.coverageLabel}${b.coveringFor ? ` · covering ${b.coveringFor}` : ""} · ${formatRange12h(b.start, b.end)}`
+                            ? `${b.coverageLabel} · ${formatRange12h(b.start, b.end)}`
                             : b.type === "Working" ? formatRange12h(b.start, b.end) : `${blockLabel(b.type)} · ${formatRange12h(b.start, b.end)}`}
                         </div>
                       ))}
@@ -272,7 +272,7 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
                     <div className="flex flex-wrap gap-1.5 mt-2">
                       {allTasks.map((t) => (
                         <span key={t.id} className={`text-[11px] px-2 py-0.5 rounded-full border whitespace-nowrap ${taskColor(t.name)}`}>
-                          {t.name}{t.payer ? ` (${t.payer})` : ""}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""}{chipTimeSuffix(t, info.blocks)}
+                          {t.name}{t.payer ? ` (${t.payer})` : ""}{chipTimeSuffix(t, info.blocks)}
                         </span>
                       ))}
                     </div>
@@ -1577,16 +1577,32 @@ function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, 
                   )}
                   {!hideTasksRow && hasTasks && (() => {
                     const allTasks = sortTasksForDisplay(c.tasks);
+                    const coverageBlocks = blocks.filter((b) => b.coverageLabel);
+                    const coverageKeys = new Set(coverageBlocks.map((b) => `${b.coverageLabel}::${b.coveringFor}::${b.start}::${b.end}`));
+                    const flowingTasks = allTasks.filter((t) => !(t.coveringFor && coverageKeys.has(`${t.name}::${t.coveringFor}::${t.start}::${t.end}`)));
+                    const positionedTasks = allTasks.filter((t) => t.coveringFor && coverageKeys.has(`${t.name}::${t.coveringFor}::${t.start}::${t.end}`));
                     // Align with wherever the day's earliest block actually starts, same axis the
                     // bars use — not the container edge, and not centered.
                     const blockStarts = blocks.map((b) => b.start).filter(Boolean).map(toMinutes);
                     const rowLeftPct = blockStarts.length ? pctOfDay(Math.min(...blockStarts)) : 0;
-                    if (allTasks.length === 0) return null;
+                    if (flowingTasks.length === 0 && positionedTasks.length === 0) return null;
                     return (
-                      <div className="flex flex-wrap gap-1 mt-1.5" style={{ marginLeft: `${rowLeftPct}%` }}>
-                        {allTasks.map((t) => (
-                          <span key={t.id} className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${taskColor(t.name)}`}>
-                            {t.name}{t.payer ? ` (${t.payer})` : ""}{t.coveringFor ? ` · covering ${t.coveringFor}` : ""}{chipTimeSuffix(t, blocks)}
+                      <div className="relative mt-1.5">
+                        <div className="flex flex-wrap gap-1" style={{ marginLeft: `${rowLeftPct}%` }}>
+                          {flowingTasks.map((t) => (
+                            <span key={t.id} className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${taskColor(t.name)}`}>
+                              {t.name}{t.payer ? ` (${t.payer})` : ""}{chipTimeSuffix(t, blocks)}
+                            </span>
+                          ))}
+                        </div>
+                        {positionedTasks.map((t) => (
+                          <span
+                            key={t.id}
+                            style={{ position: "absolute", top: 0, left: `${pctOfDay(toMinutes(t.start))}%` }}
+                            className={`text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap ${taskColor(t.name)}`}
+                            title={`${t.name} · covering ${t.coveringFor} · ${formatRange12h(t.start, t.end)}`}
+                          >
+                            {t.name} · covering {t.coveringFor}
                           </span>
                         ))}
                       </div>
@@ -4156,10 +4172,10 @@ export default function ManagerSchedule() {
           parsed = commentsBackfilled.data;
           const weekendRulesAdded = ensureWeekendCoverageRules(parsed);
           parsed = weekendRulesAdded.data;
-          const scFilled = ensureStandingCoverageTasks(parsed);
-          parsed = scFilled.data;
           const coverageSynced = ensureCoverageSync(parsed);
           parsed = coverageSynced.data;
+          const scFilled = ensureStandingCoverageTasks(parsed);
+          parsed = scFilled.data;
           if (pruned.changed || filled.changed || pinned.changed || emailed.changed || exempted.changed || qaMonthly.changed || commentsBackfilled.changed || weekendRulesAdded.changed || scFilled.changed || coverageSynced.changed) await storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
         }
         setData(parsed);
