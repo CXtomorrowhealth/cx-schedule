@@ -3545,6 +3545,7 @@ export default function ManagerSchedule() {
   const [timelineDate, setTimelineDate] = useState(null);
   const [editing, setEditing] = useState(null); // {empId, date}
   const [copyToDates, setCopyToDates] = useState([]);
+  const [copyConfirm, setCopyConfirm] = useState(""); // brief confirmation text after "Copy to N days"
   const [addingEmp, setAddingEmp] = useState(false);
   const [newEmpName, setNewEmpName] = useState("");
   const [newEmpTeam, setNewEmpTeam] = useState("");
@@ -3997,12 +3998,13 @@ export default function ManagerSchedule() {
   };
 
   const copyCellToDates = (empId, sourceDate, targetDates) => {
-    const sourceCell = cells[cellKey(empId, sourceDate)] || emptyCell();
+    const raw = cells[cellKey(empId, sourceDate)];
+    const sourceCell = raw ? normalizeCell(raw) : emptyCell();
     const nextCells = { ...cells };
     targetDates.forEach((d) => {
       nextCells[cellKey(empId, d)] = {
         ...sourceCell,
-        tasks: sourceCell.tasks.map((t) => ({ ...t })),
+        tasks: (sourceCell.tasks || []).map((t) => ({ ...t })),
         blocks: Array.isArray(sourceCell.blocks) ? sourceCell.blocks.map((b) => ({ ...b })) : sourceCell.blocks,
       };
     });
@@ -4716,11 +4718,18 @@ export default function ManagerSchedule() {
               </div>
               <button
                 disabled={copyToDates.length === 0}
-                onClick={() => { copyCellToDates(editing.empId, editing.date, copyToDates); setCopyToDates([]); }}
+                onClick={() => {
+                  const n = copyToDates.length;
+                  copyCellToDates(editing.empId, editing.date, copyToDates);
+                  setCopyToDates([]);
+                  setCopyConfirm(`Copied to ${n} day${n === 1 ? "" : "s"} — check any of those dates on the Schedule grid to confirm.`);
+                  setTimeout(() => setCopyConfirm(""), 6000);
+                }}
                 className="w-full text-xs px-3 py-1.5 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 Copy to {copyToDates.length || ""} day{copyToDates.length === 1 ? "" : "s"}
               </button>
+              {copyConfirm && <p className="text-[11px] text-teal-700 mt-1.5">{copyConfirm}</p>}
             </div>
 
             <button onClick={() => setEditing(null)} className="th-btn-primary transition-colors w-full flex items-center justify-center gap-2 text-sm px-3 py-2 rounded text-white font-medium">
