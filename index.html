@@ -602,6 +602,26 @@ function ensureEmployeeEmails(dataObj) {
 // This only sets the default once per employee; a manager toggling it in CA Eval always wins
 // after that.
 const DEFAULT_TICKETS_EXEMPT = ["kalei-harris"];
+// One-time backfill: the real spreadsheet comments (exact reasons like "Dentist appt" or
+// "covering for audrey 8/15") were extracted from the original Excel file after the fact, so
+// existing saved data won't have them yet. This patches any Time Off entry that's missing a
+// comment but has a known one, keyed by empId+date. Entries that already have a comment (added
+// since) are left alone, and entries with no matching backfill are untouched.
+const TIMEOFF_COMMENT_BACKFILL = {"nivia-muniz::2026-05-22": "Memorial Day Flex", "nivia-muniz::2026-06-08": "Working Sunday 6/7 all day", "nivia-muniz::2026-07-21": "late sign in - returns 2:30PM", "bhavana-samtani::2026-05-26": "5/30 Sat makeup day", "bhavana-samtani::2026-06-08": "Flexing 11-8pm (Covering for Nivia)", "bhavana-samtani::2026-06-11": "5/31 Flex/Makeup", "bhavana-samtani::2026-06-12": "covering After-hours for Nivia", "bhavana-samtani::2026-07-09": "july 3rd!", "bhavana-samtani::2026-08-12": "flexing to 8/15", "bhavana-samtani::2026-08-15": "covering for audrey 8/15", "bhavana-samtani::2026-08-27": "leaves at 1:30pm, makeup Sun 8/30", "bhavana-samtani::2026-09-09": "leaves at 12:30pm, makeup Sun 9/6!", "kaylee-collins::2026-04-15": "Leaving at 3:30pm", "kaylee-collins::2026-04-28": "Gone 1:30pm-4:30pm", "kaylee-collins::2026-05-05": "Dr. Appt from 9:15-11:30", "kaylee-collins::2026-05-06": "Appt from 3-4:30pm", "kaylee-collins::2026-05-11": "12:45-1:45", "kaylee-collins::2026-05-27": "Gone 8-10am", "kaylee-collins::2026-06-03": "From 8-8:45 and frm 4-4:30", "kaylee-collins::2026-06-16": "30 mins extra, 8am-5pm", "kaylee-collins::2026-06-18": "30 mins less, working 8:30am-4:30pm", "kaylee-collins::2026-06-23": "30 mins extra, 8am-5pm", "kaylee-collins::2026-06-25": "30 mins less, working 8:30am-4:30pm", "kaylee-collins::2026-06-26": "Juneteenth", "kaylee-collins::2026-06-29": "30 mins less, working 8:30am-4:30pm", "kaylee-collins::2026-06-30": "30 mins extra, 8am-5pm", "kaylee-collins::2026-07-06": "July 4th", "kaylee-collins::2026-07-07": "working 8am-5pm (30 mins extra), and 30 mins less on the 9th", "kaylee-collins::2026-07-09": "Working 8:30am-4:30pm (30 mins less, making it up on the 7th)", "kaylee-collins::2026-07-13": "Leaving 45 mins early, working 8-3:45p", "kaylee-collins::2026-07-14": "Working 8:30a-4:30pm, making up the 30 mins on the 13th", "kaylee-collins::2026-07-15": "OOO: 12pm-1:30pm", "kaylee-collins::2026-07-20": "Gone from 9a-11a", "kaylee-collins::2026-07-21": "8:30a-5p", "kaylee-collins::2026-08-06": "Working 8:45a-5:15p", "kaylee-collins::2026-08-11": "Dentist appt", "kaylee-collins::2026-08-13": "Appt. Arriving 1.5 hour late, 9:30a-4:30p work day. Making up 1.5 hr on Saturday 8/15", "shelyn-hernandez::2026-04-22": "Dentist appt, coming in at 11am", "shelyn-hernandez::2026-04-30": "Working 8am-4:30pm", "shelyn-hernandez::2026-05-28": "Memorial Day", "shelyn-hernandez::2026-07-08": "July 4th", "shelyn-hernandez::2026-11-08": "Need Sunday Coverage", "desiree-leroy::2026-03-25": "12:30-2:30PM EST", "desiree-leroy::2026-04-22": "Medical testing 11am-3pm", "desiree-leroy::2026-06-22": "Juneteenth", "kathleen-ransom::2026-04-14": "Doctor's appt, gone 9:25am-11:50am", "kathleen-ransom::2026-04-20": "Leaving at 2pm for doctor's appt", "kathleen-ransom::2026-04-24": "Half day, working Saturday w/ Audrey", "kathleen-ransom::2026-04-29": "Gone from 2:25pm-4:30pm", "kathleen-ransom::2026-06-09": "Gone from 1:50pm-4:30pm", "kalei-harris::2026-05-29": "Memorial Day Flex", "dafne-torres::2026-05-07": "OOO in the AM, working PM", "dafne-torres::2026-05-14": "OOO in the morning, working in the afternoon", "dafne-torres::2026-05-18": "Memorial Day", "dafne-torres::2026-05-20": "1 hr - Leaving at 4:30pm EST", "dafne-torres::2026-05-28": "Memorial Day", "dafne-torres::2026-07-23": "PTO ~ leaving at 1pm", "audrey-kaufman::2026-06-02": "working 3-5pm (covering for Shelyn sunday 5/31)", "audrey-kaufman::2026-08-04": "Covering for Nivia 8/3, 11:30a-8pm EST schedule. 7/30-7/31 as well."};
+function ensureTimeOffComments(dataObj) {
+  let changed = false;
+  const nextTimeOffDates = (dataObj.timeOffDates || []).map((entry) => {
+    if (entry.comment) return entry;
+    const key = `${entry.empId}::${entry.date}`;
+    const comment = TIMEOFF_COMMENT_BACKFILL[key];
+    if (!comment) return entry;
+    changed = true;
+    return { ...entry, comment };
+  });
+  if (!changed) return { data: dataObj, changed: false };
+  return { data: { ...dataObj, timeOffDates: nextTimeOffDates }, changed: true };
+}
+
 function ensureTicketsExemptDefaults(dataObj) {
   let changed = false;
   const nextEmployees = (dataObj.employees || []).map((e) => {
@@ -3961,7 +3981,9 @@ export default function ManagerSchedule() {
           parsed = exempted.data;
           const qaMonthly = ensureQaEvalMonthly(parsed);
           parsed = qaMonthly.data;
-          if (pruned.changed || filled.changed || pinned.changed || emailed.changed || exempted.changed || qaMonthly.changed) await storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
+          const commentsBackfilled = ensureTimeOffComments(parsed);
+          parsed = commentsBackfilled.data;
+          if (pruned.changed || filled.changed || pinned.changed || emailed.changed || exempted.changed || qaMonthly.changed || commentsBackfilled.changed) await storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
         }
         setData(parsed);
       } else if (!isPoll) {
