@@ -31,7 +31,7 @@
 </div>
 <script type="text/babel" data-type="module" data-presets="react">
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Plus, Trash2, X, RefreshCw, Users, CalendarPlus, Save, AlertCircle, AlertTriangle, CalendarDays, Gift, Clock3, UserCheck, Mail, Copy, Check, Pencil, Gauge, Microscope, Lock, FileSpreadsheet, Download, Undo2, Palmtree, Thermometer, TrendingDown, MessageSquare, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, Trash2, X, RefreshCw, Users, CalendarPlus, Save, AlertCircle, AlertTriangle, CalendarDays, Gift, Clock3, UserCheck, Mail, Copy, Check, Pencil, Gauge, Microscope, Lock, FileSpreadsheet, Download, Undo2, Palmtree, Thermometer, TrendingDown, MessageSquare, ChevronLeft, ChevronRight, ChevronDown } from "lucide-react";
 
 const STORAGE_KEY = "cx-schedule-v1";
 // Better than a plaintext constant, but still a client-side check — someone determined enough
@@ -307,6 +307,7 @@ function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, of
   );
 }
 
+const WEEKDAY_SHORT = ["S", "M", "T", "W", "T", "F", "S"]; // indexed like Date.getDay(): 0=Sun..6=Sat
 const STATUS = {
   "": { label: "Working", dot: "bg-emerald-500", pill: "" },
   OOO: { label: "OOO", dot: "bg-amber-500", pill: "bg-amber-50 text-amber-800 border-amber-200" },
@@ -413,6 +414,18 @@ function employeeWorkingWindows(cell, empShiftStart, empShiftEnd) {
   return blocks.filter((b) => b.type === "Working" && b.start && b.end).map((b) => [b.start, b.end]);
 }
 
+function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+  const as = toMinutes(aStart), ae = toMinutes(aEnd), bs = toMinutes(bStart), be = toMinutes(bEnd);
+  if (as == null || ae == null || bs == null || be == null) return false;
+  return as < be && bs < ae;
+}
+
+// Used for standing-coverage auto-fill: is this person actually on the clock at all during
+// the given window that day (accounts for OOO/Sick/etc. blocks shrinking their working time)?
+function isAvailableForWindow(cell, empShiftStart, empShiftEnd, winStart, winEnd) {
+  return employeeWorkingWindows(cell, empShiftStart, empShiftEnd).some(([s, e]) => rangesOverlap(s, e, winStart, winEnd));
+}
+
 // Windows during which an "IB" task applies, before intersecting with actual working time.
 function ibTaskWindows(cell, shiftStart, shiftEnd) {
   if (!cell) return [];
@@ -489,6 +502,37 @@ function ensureAutoDates(dataObj) {
   if (missing.length === 0) return { data: dataObj, changed: false };
   const nextDates = [...dataObj.dates, ...missing].sort();
   return { data: { ...dataObj, dates: nextDates, updatedAt: Date.now() }, changed: true };
+}
+
+// Auto-fills each standing-coverage rule (e.g. "After Hours Coverage" M-F 5:30-8pm) onto its
+// default assignee for any matching weekday where they're actually on the clock during that
+// window. If they're OOO/Sick/etc. and can't cover it, this deliberately does NOT reassign it
+// to anyone — that day surfaces as a "needs coverage" gap in the Schedule tab instead, so a
+// manager has to consciously pick who's covering rather than it silently landing on someone.
+function ensureStandingCoverageTasks(dataObj) {
+  const rules = dataObj.standingCoverage || [];
+  if (rules.length === 0) return { data: dataObj, changed: false };
+  const employeesById = {};
+  (dataObj.employees || []).forEach((e) => { employeesById[e.id] = e; });
+  let changed = false;
+  const nextCells = { ...dataObj.cells };
+  (dataObj.dates || []).forEach((date) => {
+    const weekday = new Date(date + "T00:00:00").getDay();
+    rules.forEach((rule) => {
+      if (!rule.weekdays.includes(weekday) || !rule.assigneeId) return;
+      const emp = employeesById[rule.assigneeId];
+      if (!emp) return;
+      const key = cellKey(rule.assigneeId, date);
+      const cell = nextCells[key] || emptyCell();
+      const alreadyHas = (cell.tasks || []).some((t) => t.name === rule.label && t.start === rule.start && t.end === rule.end);
+      if (alreadyHas) return;
+      if (!isAvailableForWindow(cell, emp.shiftStart, emp.shiftEnd, rule.start, rule.end)) return; // leave as a gap
+      changed = true;
+      nextCells[key] = { ...cell, tasks: [...(cell.tasks || []), { id: `sc-${rule.id}-${date}`, name: rule.label, scope: "partial", start: rule.start, end: rule.end }] };
+    });
+  });
+  if (!changed) return { data: dataObj, changed: false };
+  return { data: { ...dataObj, cells: nextCells, updatedAt: Date.now() }, changed: true };
 }
 
 // Weekly cleanup: on Tuesdays only, move any date older than this week's Monday (and its
@@ -790,10 +834,14 @@ function deriveLegacyFieldsFromBlocks(blocks) {
 }
 
 
+const DEFAULT_STANDING_COVERAGE = [
+  { id: "after-hours", label: "After Hours Coverage", start: "17:30", end: "20:00", weekdays: [1, 2, 3, 4, 5], assigneeId: "nivia-muniz" },
+];
+
 function normalizeData(raw) {
   const cells = {};
   Object.entries(raw.cells || {}).forEach(([k, v]) => { cells[k] = normalizeCell(v); });
-  return { ...raw, cells };
+  return { ...raw, cells, standingCoverage: Array.isArray(raw.standingCoverage) ? raw.standingCoverage : DEFAULT_STANDING_COVERAGE };
 }
 
 const TABS = [
@@ -890,7 +938,7 @@ function ScopeToggle({ scope, start, end, onChange }) {
 const FUNCTION_LIBRARY = [
   "IB", "DRO", "Triage", "Routing", "Review", "Comments", "Manual Tickets",
   "Handoffs", "COMs", "Member Outreach", "Customer Support Outreach",
-  "Platform", "Urgents", "Project", "Patient Ops Support",
+  "Platform", "Urgents", "Project", "Patient Ops Support", "After Hours Coverage",
 ];
 
 const COM_PAYERS = ["AP", "CareSource", "GHP"];
@@ -1275,6 +1323,14 @@ function TimelineBar({ label, start, end, color }) {
   );
 }
 
+// Coverage defaults to spanning the whole block, but a covering person's actual specific hours
+// (e.g. covering only the first half of someone's OOO window) can be set separately.
+function coveredByLabel(b) {
+  if (!b.coveredBy) return "";
+  if (b.coveredByStart && b.coveredByEnd) return `${b.coveredBy} (${formatRange12h(b.coveredByStart, b.coveredByEnd)})`;
+  return b.coveredBy;
+}
+
 // One merged bar for a whole day's blocks — segments sit edge-to-edge at their real times
 // instead of each block getting its own separate row. Non-Working segments get a diagonal
 // stripe texture (not just a color) plus a small icon, so they're distinguishable even without
@@ -1287,7 +1343,7 @@ function DayBlocksBar({ blocks, workingColor, height = "h-7" }) {
     return (
       <div className={`relative ${height} rounded flex items-center justify-center gap-1.5 text-[10px] font-semibold text-white px-2`}
         style={{ backgroundColor: blockColor(b.type, workingColor), ...blockStripe(b.type, blockColor(b.type, workingColor)) }}>
-        {Icon && <Icon className="w-3 h-3" />} {blockLabel(b.type)}{b.coveredBy ? ` · covered by ${b.coveredBy}` : ""}
+        {Icon && <Icon className="w-3 h-3" />} {blockLabel(b.type)}{b.coveredBy ? ` · covered by ${coveredByLabel(b)}` : ""}
       </div>
     );
   }
@@ -1306,12 +1362,12 @@ function DayBlocksBar({ blocks, workingColor, height = "h-7" }) {
         return (
           <div key={b.id || i} style={{ left: `${left}%`, width: `${width}%`, backgroundColor: color, ...blockStripe(b.type, color) }}
             className="absolute inset-y-0 flex items-center justify-center gap-1 text-[10px] font-medium text-white px-1 whitespace-nowrap overflow-hidden"
-            title={`${blockLabel(b.type)} · ${formatRange12h(b.start, b.end)}${b.coveredBy ? ` · covered by ${b.coveredBy}` : ""}`}
+            title={`${blockLabel(b.type)} · ${formatRange12h(b.start, b.end)}${b.coveredBy ? ` · covered by ${coveredByLabel(b)}` : ""}`}
           >
             {Icon && <Icon className="w-3 h-3 shrink-0" />}
             <span className="truncate">
               {b.type === "Working" ? `${formatRange12h(b.start, b.end)}` : blockLabel(b.type)}
-              {b.coveredBy ? ` · ${b.coveredBy}` : ""}
+              {b.coveredBy ? ` · ${coveredByLabel(b)}` : ""}
             </span>
           </div>
         );
@@ -3823,6 +3879,9 @@ export default function ManagerSchedule() {
   const [newEmpTeam, setNewEmpTeam] = useState("");
   const [addingDate, setAddingDate] = useState(false);
   const [newDate, setNewDate] = useState("");
+  const [showCoverageSettings, setShowCoverageSettings] = useState(false);
+  const [coverageGapPicker, setCoverageGapPicker] = useState(null); // `${ruleId}::${date}` currently open, if any
+  const [copyToDaysOpen, setCopyToDaysOpen] = useState(false);
   const [logTimeOff, setLogTimeOff] = useState(null); // empId
   const [logPickerEmp, setLogPickerEmp] = useState("");
   const [logDate, setLogDate] = useState("");
@@ -3983,7 +4042,9 @@ export default function ManagerSchedule() {
           parsed = qaMonthly.data;
           const commentsBackfilled = ensureTimeOffComments(parsed);
           parsed = commentsBackfilled.data;
-          if (pruned.changed || filled.changed || pinned.changed || emailed.changed || exempted.changed || qaMonthly.changed || commentsBackfilled.changed) await storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
+          const scFilled = ensureStandingCoverageTasks(parsed);
+          parsed = scFilled.data;
+          if (pruned.changed || filled.changed || pinned.changed || emailed.changed || exempted.changed || qaMonthly.changed || commentsBackfilled.changed || scFilled.changed) await storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
         }
         setData(parsed);
       } else if (!isPoll) {
@@ -4480,6 +4541,28 @@ export default function ManagerSchedule() {
     persist({ ...data, holidays: nextHolidays, updatedAt: Date.now() });
   };
 
+  const updateStandingCoverage = (ruleId, field, value) => {
+    const nextRules = (data.standingCoverage || []).map((r) => r.id === ruleId ? { ...r, [field]: value } : r);
+    persist({ ...data, standingCoverage: nextRules, updatedAt: Date.now() });
+  };
+  const toggleStandingCoverageWeekday = (ruleId, weekday) => {
+    const rule = (data.standingCoverage || []).find((r) => r.id === ruleId);
+    if (!rule) return;
+    const has = rule.weekdays.includes(weekday);
+    const nextWeekdays = has ? rule.weekdays.filter((d) => d !== weekday) : [...rule.weekdays, weekday].sort();
+    updateStandingCoverage(ruleId, "weekdays", nextWeekdays);
+  };
+  // Manually fills a single day's gap (e.g. the default assignee was out) onto whoever's
+  // actually covering, without touching the rule's default assignee going forward.
+  const assignCoverageForDate = (rule, date, empId) => {
+    if (!empId) return;
+    const key = cellKey(empId, date);
+    const cell = cells[key] || emptyCell();
+    if ((cell.tasks || []).some((t) => t.name === rule.label && t.start === rule.start && t.end === rule.end)) return;
+    const nextCells = { ...cells, [key]: { ...cell, tasks: [...(cell.tasks || []), { id: `sc-${rule.id}-${date}-manual`, name: rule.label, scope: "partial", start: rule.start, end: rule.end }] } };
+    persist({ ...data, cells: nextCells, updatedAt: Date.now() });
+  };
+
   const addVolunteer = (holidayId, volunteer) => {
     const nextHolidays = holidays.map((h) => h.id === holidayId ? { ...h, volunteers: [...(h.volunteers || []), volunteer] } : h);
     persist({ ...data, holidays: nextHolidays, updatedAt: Date.now() });
@@ -4575,6 +4658,13 @@ export default function ManagerSchedule() {
             >
               <CalendarPlus className="w-3.5 h-3.5" /> Add date
             </button>
+            <button
+              onClick={() => setShowCoverageSettings((v) => !v)}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-colors"
+              style={{ borderColor: TH.border, color: TH.textMid }}
+            >
+              <Clock3 className="w-3.5 h-3.5" /> Standing coverage
+            </button>
             {Object.keys(data.scheduleArchive || {}).length > 0 && (
               <select
                 value=""
@@ -4589,6 +4679,93 @@ export default function ManagerSchedule() {
               </select>
             )}
           </div>
+
+          {showCoverageSettings && (
+            <div className="px-4 sm:px-6 py-3 border-b space-y-3" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
+              {(data.standingCoverage || []).map((rule) => (
+                <div key={rule.id} className="flex flex-wrap items-center gap-2.5 text-xs">
+                  <span className="font-medium text-slate-700 w-40 shrink-0">{rule.label}</span>
+                  <div className="flex items-center gap-1">
+                    {WEEKDAY_SHORT.map((label, wd) => (
+                      <button
+                        key={wd}
+                        onClick={() => toggleStandingCoverageWeekday(rule.id, wd)}
+                        className="w-6 h-6 rounded-full text-[10px] font-mono border"
+                        style={rule.weekdays.includes(wd)
+                          ? { backgroundColor: TH.teal, color: "#fff", borderColor: TH.teal }
+                          : { backgroundColor: "#fff", color: "#94a3b8", borderColor: TH.border }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <input type="time" value={rule.start} onChange={(e) => updateStandingCoverage(rule.id, "start", e.target.value)}
+                    className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-900" />
+                  <span className="text-slate-400">–</span>
+                  <input type="time" value={rule.end} onChange={(e) => updateStandingCoverage(rule.id, "end", e.target.value)}
+                    className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-900" />
+                  <select
+                    value={rule.assigneeId}
+                    onChange={(e) => updateStandingCoverage(rule.id, "assigneeId", e.target.value)}
+                    className="bg-white border border-slate-300 rounded px-2 py-1 text-xs text-slate-900"
+                  >
+                    {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  </select>
+                </div>
+              ))}
+              <p className="text-[11px] text-slate-400">
+                Auto-fills onto the assignee's schedule on the checked days when they're actually working that window. If they're out, it's left unfilled and flagged below instead of silently landing on someone else.
+              </p>
+            </div>
+          )}
+
+          {(() => {
+            // Gaps: a rule's weekday with nobody at all carrying that task that day — either
+            // the default assignee is out and nobody's been manually reassigned yet.
+            const gaps = [];
+            (data.standingCoverage || []).forEach((rule) => {
+              dates.forEach((date) => {
+                if (date < todayISO) return;
+                const weekday = new Date(date + "T00:00:00").getDay();
+                if (!rule.weekdays.includes(weekday)) return;
+                const covered = employees.some((e) => (cells[cellKey(e.id, date)]?.tasks || []).some((t) => t.name === rule.label && t.start === rule.start && t.end === rule.end));
+                if (!covered) gaps.push({ rule, date });
+              });
+            });
+            if (gaps.length === 0) return null;
+            return (
+              <div className="px-4 sm:px-6 py-2.5 border-b space-y-1.5" style={{ borderColor: "#fde68a", backgroundColor: "#fffbeb" }}>
+                {gaps.map(({ rule, date }) => {
+                  const pickerKey = `${rule.id}::${date}`;
+                  return (
+                    <div key={pickerKey} className="flex items-center gap-2 text-xs flex-wrap">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                      <span className="text-amber-800">
+                        <strong>{rule.label}</strong> needs someone on <strong>{fmtDate(date)}</strong> ({formatRange12h(rule.start, rule.end)})
+                      </span>
+                      {coverageGapPicker === pickerKey ? (
+                        <>
+                          <select
+                            onChange={(e) => { assignCoverageForDate(rule, date, e.target.value); setCoverageGapPicker(null); }}
+                            defaultValue=""
+                            className="bg-white border border-amber-300 rounded px-2 py-1 text-xs text-slate-900"
+                          >
+                            <option value="" disabled>Who's covering?</option>
+                            {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                          </select>
+                          <button onClick={() => setCoverageGapPicker(null)} className="text-amber-700 hover:text-amber-900">Cancel</button>
+                        </>
+                      ) : (
+                        <button onClick={() => setCoverageGapPicker(pickerKey)} className="text-amber-700 hover:text-amber-900 underline font-medium">
+                          Assign
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
 
           <TimelineView
             employees={employees}
@@ -4904,175 +5081,222 @@ export default function ManagerSchedule() {
       {/* Edit cell modal */}
       {editing && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setEditing(null)}>
-          <div className="bg-white border border-slate-300 rounded-lg w-full max-w-md max-h-[85vh] overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 pt-5 pb-3 sticky top-0 bg-white z-10">
               <div>
                 <h3 className="text-sm font-semibold text-slate-900">{editEmp?.name}</h3>
-                <p className="text-xs text-slate-500 font-mono">{fmtDate(editing.date)}</p>
+                <p className="text-xs text-slate-400 font-mono mt-0.5">{fmtDate(editing.date)}</p>
               </div>
-              <button onClick={() => setEditing(null)} className="text-slate-500 hover:text-slate-900"><X className="w-4 h-4" /></button>
+              <button onClick={() => setEditing(null)} className="text-slate-400 hover:text-slate-700 p-1 -m-1 rounded-full hover:bg-slate-100 transition-colors"><X className="w-4 h-4" /></button>
             </div>
 
-            {(data.timeOffDates || []).some((td) => td.empId === editing.empId && td.date === editing.date) && (
-              <div className="flex items-center gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-3 py-2 mb-4">
-                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                Time off is logged for this person on this date (Time Off tab) — make sure what you set here matches.
-              </div>
-            )}
-
-            {(() => {
-              const blocks = editCell.blocks || [];
-              const hasWorking = blocks.some((b) => b.type === "Working");
-              const isAllDay = (b) => !b.start && !b.end;
-
-              const addBlock = () => {
-                const empStart = editEmp?.shiftStart || "09:00";
-                const empEnd = editEmp?.shiftEnd || "17:00";
-                const last = blocks[blocks.length - 1];
-                // A second-or-later block always gets explicit times — "all day" only makes
-                // sense when it's the ONLY thing happening that day.
-                updateBlocks(editing.empId, editing.date, [
-                  ...blocks.map((b) => isAllDay(b) ? { ...b, start: b.type === "Working" ? empStart : "09:00", end: b.type === "Working" ? empEnd : "17:00" } : b),
-                  { id: `blk${Date.now()}`, type: "Working", start: last?.end || empStart, end: empEnd },
-                ]);
-              };
-              const patchBlock = (id, patch) => updateBlocks(editing.empId, editing.date, blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)));
-              const removeBlock = (id) => updateBlocks(editing.empId, editing.date, blocks.filter((b) => b.id !== id));
-
-              return (
-                <>
-                  <label className="block text-xs text-slate-500 mb-2">Blocks for today</label>
-                  <div className="space-y-2 mb-2">
-                    {blocks.map((b) => (
-                      <div key={b.id} className="border border-slate-200 rounded-lg p-2.5">
-                        <div className="flex items-center gap-2 mb-2">
-                          <select
-                            value={b.type}
-                            onChange={(e) => patchBlock(b.id, { type: e.target.value })}
-                            className="text-xs font-mono border border-slate-300 rounded px-1.5 py-1.5 bg-white text-slate-900"
-                          >
-                            {BLOCK_TYPES.map((t) => <option key={t} value={t}>{blockLabel(t)}</option>)}
-                          </select>
-                          {blocks.length === 1 && (
-                            <label className="flex items-center gap-1 text-[10px] text-slate-500 shrink-0 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={isAllDay(b)}
-                                onChange={(e) => patchBlock(b.id, e.target.checked
-                                  ? { start: "", end: "" }
-                                  : { start: b.type === "Working" ? (editEmp?.shiftStart || "09:00") : "09:00", end: b.type === "Working" ? (editEmp?.shiftEnd || "17:00") : "17:00" })}
-                                className="accent-teal-600"
-                              />
-                              All day
-                            </label>
-                          )}
-                          {blocks.length > 1 && (
-                            <button onClick={() => removeBlock(b.id)} className="text-slate-400 hover:text-rose-600 ml-auto shrink-0" title="Remove this block">
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
-                        {!isAllDay(b) && (
-                          <div className="flex items-center gap-2 mb-2">
-                            <input type="time" value={b.start} onChange={(e) => patchBlock(b.id, { start: e.target.value })}
-                              className="flex-1 bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900" />
-                            <span className="text-slate-400 text-xs">–</span>
-                            <input type="time" value={b.end} onChange={(e) => patchBlock(b.id, { end: e.target.value })}
-                              className="flex-1 bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900" />
-                          </div>
-                        )}
-                        {b.type !== "Working" && b.type !== "NotScheduled" && (
-                          <div className="border-t border-slate-100 pt-2">
-                            <label className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer mb-1.5">
-                              <input
-                                type="checkbox"
-                                checked={!!b.coveredBy || b._showCoverPicker}
-                                onChange={(e) => patchBlock(b.id, e.target.checked ? { _showCoverPicker: true } : { coveredBy: "", _showCoverPicker: false })}
-                                className="accent-teal-600"
-                              />
-                              Covered?
-                            </label>
-                            {(b.coveredBy || b._showCoverPicker) && (
-                              <select
-                                value={b.coveredBy || ""}
-                                onChange={(e) => patchBlock(b.id, { coveredBy: e.target.value })}
-                                className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-xs text-slate-900"
-                              >
-                                <option value="">Who's covering?</option>
-                                {employees.filter((e) => e.id !== editing.empId).map((e) => (
-                                  <option key={e.id} value={e.name}>{e.name}</option>
-                                ))}
-                              </select>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                  <button
-                    onClick={addBlock}
-                    className="w-full text-xs px-3 py-2 rounded-full border border-dashed border-slate-300 text-slate-500 hover:border-teal-500 hover:text-teal-700 flex items-center justify-center gap-1.5 mb-4"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Add another block
-                  </button>
-
-                  {hasWorking && (
-                    <>
-                      <label className="block text-xs text-slate-500 mb-1.5">Skills — each can be all day or specific hours</label>
-                      <div className="mb-4">
-                        <TaskBuilder
-                          tasks={editCell.tasks}
-                          onAddBatch={(newTasks) => addTasks(editing.empId, editing.date, newTasks)}
-                          onRemove={(taskId) => removeTask(editing.empId, editing.date, taskId)}
-                          functionOptions={functionOptions}
-                        />
-                      </div>
-                    </>
-                  )}
-                </>
-              );
-            })()}
-
-            <div className="border-t border-slate-200 pt-3 mb-4">
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="block text-xs text-slate-500">Copy this day to other days</label>
-                <div className="flex gap-2">
-                  <button onClick={() => setCopyToDates(dates.filter((d) => d !== editing.date))} className="text-[10px] font-medium" style={{ color: TH.tealDark }}>All</button>
-                  <button onClick={() => setCopyToDates([])} className="text-[10px] text-slate-400 font-medium">Clear</button>
+            <div className="px-5 pb-5">
+              {(data.timeOffDates || []).some((td) => td.empId === editing.empId && td.date === editing.date) && (
+                <div className="flex items-center gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  Time off is logged for this person on this date (Time Off tab) — make sure what you set here matches.
                 </div>
+              )}
+
+              {(() => {
+                const blocks = editCell.blocks || [];
+                const hasWorking = blocks.some((b) => b.type === "Working");
+                const isAllDay = (b) => !b.start && !b.end;
+
+                const addBlock = () => {
+                  const empStart = editEmp?.shiftStart || "09:00";
+                  const empEnd = editEmp?.shiftEnd || "17:00";
+                  const last = blocks[blocks.length - 1];
+                  // A second-or-later block always gets explicit times — "all day" only makes
+                  // sense when it's the ONLY thing happening that day.
+                  updateBlocks(editing.empId, editing.date, [
+                    ...blocks.map((b) => isAllDay(b) ? { ...b, start: b.type === "Working" ? empStart : "09:00", end: b.type === "Working" ? empEnd : "17:00" } : b),
+                    { id: `blk${Date.now()}`, type: "Working", start: last?.end || empStart, end: empEnd },
+                  ]);
+                };
+                const patchBlock = (id, patch) => updateBlocks(editing.empId, editing.date, blocks.map((b) => (b.id === id ? { ...b, ...patch } : b)));
+                const removeBlock = (id) => updateBlocks(editing.empId, editing.date, blocks.filter((b) => b.id !== id));
+
+                return (
+                  <>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] font-mono uppercase tracking-wide text-slate-400">Blocks for today</span>
+                      <button onClick={addBlock} className="flex items-center gap-1 text-[11px] font-medium text-teal-700 hover:text-teal-900">
+                        <Plus className="w-3 h-3" /> Add block
+                      </button>
+                    </div>
+                    <div className="space-y-2 mb-4">
+                      {blocks.map((b) => {
+                        const Icon = blockIcon(b.type);
+                        const accent = b.type === "Working" ? TH.teal : b.type === "NotScheduled" ? "#94a3b8" : (STATUS_SOLID_HEX[b.type] || TH.teal);
+                        return (
+                          <div key={b.id} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+                            <div className="flex items-center gap-2 px-3 py-2" style={{ backgroundColor: `${accent}14` }}>
+                              {Icon ? <Icon className="w-3.5 h-3.5 shrink-0" style={{ color: accent }} /> : <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: accent }} />}
+                              <select
+                                value={b.type}
+                                onChange={(e) => {
+                                  const newType = e.target.value;
+                                  const patch = { type: newType };
+                                  // A shift always has real hours — never leave a Working block
+                                  // blank/"all day" just because it used to be a different type.
+                                  if (newType === "Working" && !b.start && !b.end) {
+                                    patch.start = editEmp?.shiftStart || "09:00";
+                                    patch.end = editEmp?.shiftEnd || "17:00";
+                                  }
+                                  patchBlock(b.id, patch);
+                                }}
+                                className="text-xs font-semibold bg-transparent border-none outline-none py-0.5 pr-1"
+                                style={{ color: accent }}
+                              >
+                                {BLOCK_TYPES.map((t) => <option key={t} value={t}>{blockLabel(t)}</option>)}
+                              </select>
+                              {blocks.length > 1 && (
+                                <button onClick={() => removeBlock(b.id)} className="text-slate-400 hover:text-rose-600 ml-auto shrink-0" title="Remove this block">
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+
+                            <div className="px-3 py-2.5">
+                              {blocks.length === 1 && b.type !== "Working" && (
+                                <div className="flex gap-1.5 mb-2">
+                                  <button
+                                    onClick={() => patchBlock(b.id, { start: "", end: "" })}
+                                    className={`text-[11px] px-2.5 py-1 rounded-full border font-medium transition-colors ${isAllDay(b) ? "border-teal-500 text-teal-700 bg-teal-50" : "border-slate-200 text-slate-400"}`}
+                                  >
+                                    All day
+                                  </button>
+                                  <button
+                                    onClick={() => patchBlock(b.id, { start: "09:00", end: "17:00" })}
+                                    className={`text-[11px] px-2.5 py-1 rounded-full border font-medium transition-colors ${!isAllDay(b) ? "border-teal-500 text-teal-700 bg-teal-50" : "border-slate-200 text-slate-400"}`}
+                                  >
+                                    Specific hours
+                                  </button>
+                                </div>
+                              )}
+                              {(b.type === "Working" || !isAllDay(b)) && (
+                                <div className="flex items-center gap-2">
+                                  <input type="time" value={b.start || editEmp?.shiftStart || "09:00"} onChange={(e) => patchBlock(b.id, { start: e.target.value })}
+                                    className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm text-slate-900" />
+                                  <span className="text-slate-300 text-xs">–</span>
+                                  <input type="time" value={b.end || editEmp?.shiftEnd || "17:00"} onChange={(e) => patchBlock(b.id, { end: e.target.value })}
+                                    className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1.5 text-sm text-slate-900" />
+                                </div>
+                              )}
+
+                              {b.type !== "Working" && b.type !== "NotScheduled" && (
+                                <div className={`${(b.type === "Working" || !isAllDay(b)) ? "mt-2.5 pt-2.5 border-t border-slate-100" : ""}`}>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] font-mono uppercase tracking-wide text-slate-400 shrink-0">Covered by</span>
+                                    <select
+                                      value={b.coveredBy || ""}
+                                      onChange={(e) => patchBlock(b.id, e.target.value ? { coveredBy: e.target.value } : { coveredBy: "", coveredByStart: "", coveredByEnd: "" })}
+                                      className="flex-1 min-w-0 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-900"
+                                    >
+                                      <option value="">Nobody yet</option>
+                                      {employees.filter((e) => e.id !== editing.empId).map((e) => (
+                                        <option key={e.id} value={e.name}>{e.name}</option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                  {b.coveredBy && (
+                                    <div className="mt-1.5 pl-1">
+                                      {b.coveredByStart && b.coveredByEnd ? (
+                                        <div className="flex items-center gap-2">
+                                          <input type="time" value={b.coveredByStart} onChange={(e) => patchBlock(b.id, { coveredByStart: e.target.value })}
+                                            className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-900" />
+                                          <span className="text-slate-300 text-xs">–</span>
+                                          <input type="time" value={b.coveredByEnd} onChange={(e) => patchBlock(b.id, { coveredByEnd: e.target.value })}
+                                            className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-900" />
+                                          <button onClick={() => patchBlock(b.id, { coveredByStart: "", coveredByEnd: "" })} className="text-[10px] text-slate-400 hover:text-slate-600 shrink-0">Whole block</button>
+                                        </div>
+                                      ) : (
+                                        <button
+                                          onClick={() => patchBlock(b.id, { coveredByStart: b.start || "09:00", coveredByEnd: b.end || "17:00" })}
+                                          className="text-[11px] text-teal-700 hover:text-teal-900 underline"
+                                        >
+                                          Covering the whole {blockLabel(b.type).toLowerCase()} window — set specific hours instead?
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {hasWorking && (
+                      <>
+                        <span className="block text-[10px] font-mono uppercase tracking-wide text-slate-400 mb-1.5">Skills — each can be all day or specific hours</span>
+                        <div className="mb-4">
+                          <TaskBuilder
+                            tasks={editCell.tasks}
+                            onAddBatch={(newTasks) => addTasks(editing.empId, editing.date, newTasks)}
+                            onRemove={(taskId) => removeTask(editing.empId, editing.date, taskId)}
+                            functionOptions={functionOptions}
+                          />
+                        </div>
+                      </>
+                    )}
+                  </>
+                );
+              })()}
+
+              <div className="border-t border-slate-100 pt-3 mb-1">
+                <button onClick={() => setCopyToDaysOpen((v) => !v)} className="flex items-center gap-1 text-[11px] font-medium text-slate-500 hover:text-slate-700">
+                  {copyToDaysOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                  Copy this day to other days
+                </button>
+                {copyToDaysOpen && (
+                  <div className="mt-2.5">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] text-slate-400">{copyToDates.length} selected</span>
+                      <div className="flex gap-2">
+                        <button onClick={() => setCopyToDates(dates.filter((d) => d !== editing.date))} className="text-[10px] font-medium" style={{ color: TH.tealDark }}>All</button>
+                        <button onClick={() => setCopyToDates([])} className="text-[10px] text-slate-400 font-medium">Clear</button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-4 gap-1 mb-2 max-h-24 overflow-auto pr-1">
+                      {dates.filter((d) => d !== editing.date).map((d) => (
+                        <label key={d} className="flex items-center gap-1 text-[10px] text-slate-600 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={copyToDates.includes(d)}
+                            onChange={() => setCopyToDates((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d])}
+                            className="accent-teal-600"
+                          />
+                          {fmtDate(d)}
+                        </label>
+                      ))}
+                    </div>
+                    <button
+                      disabled={copyToDates.length === 0}
+                      onClick={() => {
+                        const n = copyToDates.length;
+                        copyCellToDates(editing.empId, editing.date, copyToDates);
+                        setCopyToDates([]);
+                        setCopyConfirm(`Copied to ${n} day${n === 1 ? "" : "s"} — check any of those dates on the Schedule grid to confirm.`);
+                        setTimeout(() => setCopyConfirm(""), 6000);
+                      }}
+                      className="w-full text-xs px-3 py-1.5 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Copy to {copyToDates.length || ""} day{copyToDates.length === 1 ? "" : "s"}
+                    </button>
+                    {copyConfirm && <p className="text-[11px] text-teal-700 mt-1.5">{copyConfirm}</p>}
+                  </div>
+                )}
               </div>
-              <div className="grid grid-cols-4 gap-1 mb-2 max-h-24 overflow-auto pr-1">
-                {dates.filter((d) => d !== editing.date).map((d) => (
-                  <label key={d} className="flex items-center gap-1 text-[10px] text-slate-600 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={copyToDates.includes(d)}
-                      onChange={() => setCopyToDates((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d])}
-                      className="accent-teal-600"
-                    />
-                    {fmtDate(d)}
-                  </label>
-                ))}
-              </div>
-              <button
-                disabled={copyToDates.length === 0}
-                onClick={() => {
-                  const n = copyToDates.length;
-                  copyCellToDates(editing.empId, editing.date, copyToDates);
-                  setCopyToDates([]);
-                  setCopyConfirm(`Copied to ${n} day${n === 1 ? "" : "s"} — check any of those dates on the Schedule grid to confirm.`);
-                  setTimeout(() => setCopyConfirm(""), 6000);
-                }}
-                className="w-full text-xs px-3 py-1.5 rounded-full border border-slate-300 text-slate-700 hover:border-teal-500 hover:text-teal-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                Copy to {copyToDates.length || ""} day{copyToDates.length === 1 ? "" : "s"}
-              </button>
-              {copyConfirm && <p className="text-[11px] text-teal-700 mt-1.5">{copyConfirm}</p>}
             </div>
 
-            <button onClick={() => setEditing(null)} className="th-btn-primary transition-colors w-full flex items-center justify-center gap-2 text-sm px-3 py-2 rounded text-white font-medium">
-              <Save className="w-3.5 h-3.5" /> Done
-            </button>
+            <div className="sticky bottom-0 bg-white border-t border-slate-100 px-5 py-3">
+              <button onClick={() => setEditing(null)} className="th-btn-primary transition-colors w-full flex items-center justify-center gap-2 text-sm px-3 py-2 rounded-lg text-white font-medium">
+                <Save className="w-3.5 h-3.5" /> Done
+              </button>
+            </div>
           </div>
         </div>
       )}
