@@ -622,15 +622,17 @@ function ensureCoverageSync(dataObj) {
   return { data: { ...dataObj, cells, updatedAt: Date.now() }, changed: true };
 }
 
-// Weekly cleanup: on Tuesdays only, move any date older than this week's Monday (and its
+// Weekly cleanup: on Mondays only, move any date older than this week's Monday (and its
 // cells) out of the live `dates`/`cells` — into `scheduleArchive` instead of deleting them —
-// so the live app stays lean but nothing is actually lost. Doesn't touch this week or next —
+// so the live app stays lean but nothing is actually lost. Runs the moment the app is opened
+// on/after Monday (there's no server-side cron here, so "12:01am Monday" in practice means
+// "the first load once the date has rolled over to Monday"). Doesn't touch this week or next —
 // ensureAutoDates already guarantees those stay populated. A no-op every other day of the week,
-// and a no-op on Tuesday itself once there's nothing left to prune.
-function pruneOldDatesOnTuesday(dataObj) {
+// and a no-op on Monday itself once there's nothing left to prune.
+function pruneOldDatesOnMonday(dataObj) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  if (today.getDay() !== 2) return { data: dataObj, changed: false };
-  const mondayOffset = 1 - today.getDay(); // getDay() is 2 (Tue) here, so this is always -1
+  if (today.getDay() !== 1) return { data: dataObj, changed: false };
+  const mondayOffset = today.getDay() === 0 ? -6 : 1 - today.getDay(); // getDay() is 1 (Mon) here, so this is always 0
   const monday = new Date(today); monday.setDate(today.getDate() + mondayOffset);
   const cutoff = monday.toISOString().slice(0, 10);
   const toRemove = (dataObj.dates || []).filter((d) => d < cutoff);
@@ -4243,7 +4245,7 @@ export default function ManagerSchedule() {
       if (res && res.value) {
         let parsed = normalizeData(JSON.parse(res.value));
         if (!isPoll) {
-          const pruned = pruneOldDatesOnTuesday(parsed);
+          const pruned = pruneOldDatesOnMonday(parsed);
           parsed = pruned.data;
           const filled = ensureAutoDates(parsed);
           parsed = filled.data;
