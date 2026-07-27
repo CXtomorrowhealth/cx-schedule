@@ -3335,6 +3335,7 @@ export default function ManagerSchedule() {
   const [logEnd, setLogEnd] = useState("17:00");
   const [logHours, setLogHours] = useState("8");
   const [logCoveredBy, setLogCoveredBy] = useState("");
+  const [logComment, setLogComment] = useState(""); // optional note, e.g. "half day - dentist appt"
   const [newTdEmp, setNewTdEmp] = useState("");
   const [newTdDate, setNewTdDate] = useState("");
   const [newTdLabel, setNewTdLabel] = useState("Approved");
@@ -3961,10 +3962,10 @@ export default function ManagerSchedule() {
     }
 
     // Keep the chronological "who's out and when" list in sync with what's logged here
-    next = { ...next, timeOffDates: [...(next.timeOffDates || []), { id: `td${Date.now()}`, empId: logTimeOff, date: logDate, label: logType }] };
+    next = { ...next, timeOffDates: [...(next.timeOffDates || []), { id: `td${Date.now()}`, empId: logTimeOff, date: logDate, label: logType, comment: logComment }] };
 
     persist(next);
-    setLogTimeOff(null); setLogDate(""); setLogType("PTO"); setLogScope("allday"); setLogStart("09:00"); setLogEnd("17:00"); setLogHours("8"); setLogCoveredBy(""); setLogPickerEmp("");
+    setLogTimeOff(null); setLogDate(""); setLogType("PTO"); setLogScope("allday"); setLogStart("09:00"); setLogEnd("17:00"); setLogHours("8"); setLogCoveredBy(""); setLogPickerEmp(""); setLogComment("");
   };
 
   const updateHolidayField = (holidayId, field, value) => {
@@ -4108,7 +4109,7 @@ export default function ManagerSchedule() {
               <button
                 onClick={() => {
                   if (!logPickerEmp) return;
-                  setLogTimeOff(logPickerEmp); setLogDate(""); setLogType("PTO"); setLogScope("allday"); setLogStart("09:00"); setLogEnd("17:00"); setLogHours("8"); setLogCoveredBy("");
+                  setLogTimeOff(logPickerEmp); setLogDate(""); setLogType("PTO"); setLogScope("allday"); setLogStart("09:00"); setLogEnd("17:00"); setLogHours("8"); setLogCoveredBy(""); setLogComment("");
                 }}
                 disabled={!logPickerEmp}
                 className="th-btn-primary transition-colors text-xs px-3 py-1.5 rounded-full text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed"
@@ -4126,7 +4127,7 @@ export default function ManagerSchedule() {
                 const visibleGridDates = showPastGrid ? allGridDates : upcomingGridDates;
                 const startQuickAdd = (d, empId) => {
                   setLogTimeOff(empId); setLogDate(d); setLogType("PTO"); setLogScope("allday");
-                  setLogStart("09:00"); setLogEnd("17:00"); setLogHours("8"); setLogCoveredBy("");
+                  setLogStart("09:00"); setLogEnd("17:00"); setLogHours("8"); setLogCoveredBy(""); setLogComment("");
                   setCalAddFor(null);
                 };
                 return (
@@ -4168,14 +4169,24 @@ export default function ManagerSchedule() {
                             <div className="space-y-1">
                               {entries.map((entry) => {
                                 const emp = employees.find((e) => e.id === entry.empId);
+                                // The hours/whole-day-vs-specific detail lives on the linked Schedule
+                                // cell, not on the time-off entry itself — pull it in for the tooltip.
+                                const linkedCell = cells[cellKey(entry.empId, entry.date)];
+                                const timeDetail = linkedCell && linkedCell.statusScope === "partial" && linkedCell.statusStart && linkedCell.statusEnd
+                                  ? `${formatRange12h(linkedCell.statusStart, linkedCell.statusEnd)}`
+                                  : linkedCell && linkedCell.hours
+                                    ? `Whole day (${linkedCell.hours}h)`
+                                    : "Whole day";
                                 return (
                                   <div key={entry.id} className="relative group">
                                     <div className="flex items-center justify-between gap-1 text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800">
                                       <span className="truncate">{emp ? emp.name.split(" ")[0] : entry.empId}</span>
                                       <button onClick={() => removeTimeOffDate(entry.id)} className="text-indigo-400 hover:text-rose-500 shrink-0"><X className="w-2.5 h-2.5" /></button>
                                     </div>
-                                    <div className="absolute z-30 hidden group-hover:block bottom-full left-0 mb-1 whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1 rounded shadow-lg pointer-events-none">
-                                      {emp ? emp.name : entry.empId} — {entry.label} — {fmtDate(d)}
+                                    <div className="absolute z-30 hidden group-hover:block bottom-full left-0 mb-1 whitespace-nowrap bg-slate-900 text-white text-[10px] px-2 py-1.5 rounded shadow-lg pointer-events-none max-w-[220px]">
+                                      <div className="font-semibold">{emp ? emp.name : entry.empId} — {entry.label}</div>
+                                      <div className="text-slate-300">{fmtDate(d)} · {timeDetail}</div>
+                                      {entry.comment && <div className="text-slate-300 mt-0.5 whitespace-normal">"{entry.comment}"</div>}
                                     </div>
                                   </div>
                                 );
@@ -4522,8 +4533,16 @@ export default function ManagerSchedule() {
               ))}
             </select>
 
+            <label className="block text-xs text-slate-500 mb-1.5">Comment (optional)</label>
+            <textarea
+              value={logComment} onChange={(e) => setLogComment(e.target.value)}
+              placeholder="e.g. half day — dentist appt"
+              rows={2}
+              className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900 mb-4 resize-none"
+            />
+
             <div className="flex gap-2">
-              <button onClick={() => { setLogTimeOff(null); setLogPickerEmp(""); }} className="flex-1 text-sm px-3 py-2 rounded border border-slate-300 text-slate-700">Cancel</button>
+              <button onClick={() => { setLogTimeOff(null); setLogPickerEmp(""); setLogComment(""); }} className="flex-1 text-sm px-3 py-2 rounded border border-slate-300 text-slate-700">Cancel</button>
               <button onClick={submitLogTimeOff} className="th-btn-primary transition-colors flex-1 text-sm px-3 py-2 rounded text-white font-medium">Save</button>
             </div>
           </div>
