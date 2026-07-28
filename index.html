@@ -1775,9 +1775,11 @@ function RosterTab({ employees, teamColor, updateEmployee, removeEmployee, setAd
     { key: "email", label: "Email" },
   ];
 
+  const EMPLOYEE_SCHEDULE_URL = "https://cxtomorrowhealth.github.io/cx-schedule/";
+
   const codeMessage = (emp) => ({
     subject: "Your sign-in code",
-    body: `Hi ${emp.name.split(" ")[0]},\n\nYour sign-in code for the employee schedule is: ${emp.pin}\n\nEnter it on the employee schedule link to see your shifts.\n\nThanks!`,
+    body: `Hi ${emp.name.split(" ")[0]},\n\nYour sign-in code for the employee schedule is: ${emp.pin}\n\nGo to ${EMPLOYEE_SCHEDULE_URL} and enter it to see your shifts.\n\nThanks!`,
   });
 
   const openGmailForPin = (emp) => {
