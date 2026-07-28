@@ -407,10 +407,19 @@ function isAvailableForWindow(cell, empShiftStart, empShiftEnd, winStart, winEnd
 }
 
 // Windows during which an "IB" task applies, before intersecting with actual working time.
+// Covering After Hours or Weekend Coverage functionally IS being on IB for that window — it's
+// the same "someone has to be reachable for inbound" duty, just outside normal daytime IB
+// staffing. Counting it as plain "working, off IB" understated real coverage, so both the hourly
+// heatmap and the daily IB KPI treat these standing-coverage tasks the same as an "IB" task.
+function isIbEquivalentTask(name) {
+  const n = (name || "").trim().toUpperCase();
+  return n === "IB" || n === "AFTER HOURS COVERAGE" || n === "WEEKEND COVERAGE";
+}
+
 function ibTaskWindows(cell, shiftStart, shiftEnd) {
   if (!cell) return [];
   return (cell.tasks || [])
-    .filter((t) => (t.name || "").trim().toUpperCase() === "IB")
+    .filter((t) => isIbEquivalentTask(t.name))
     .map((t) => (t.scope === "partial" && t.start && t.end) ? [t.start, t.end] : [shiftStart, shiftEnd]);
 }
 
@@ -456,6 +465,17 @@ function autoRequiredDates() {
     }
   }
   return result;
+}
+
+// So the Schedule tab opens on today by default (instead of always landing on this week's
+// Monday) whenever today is one of the loaded dates. Falls back to the first weekday in range,
+// then just the first date, for the rare case today isn't in `dates` yet (e.g. right at the
+// weekly rollover before ensureAutoDates has run).
+function defaultTimelineDate(dates) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const todayStr = today.toISOString().slice(0, 10);
+  if (dates.includes(todayStr)) return todayStr;
+  return dates.find((d) => !isWeekend(d)) || dates[0];
 }
 
 // The Time Off Grid needs to plan further out than the Schedule tab's 2-week rolling window —
@@ -4514,7 +4534,7 @@ export default function ManagerSchedule() {
     const total = pool.length || 1;
     const onIb = pool.filter((e) => {
       const c = cells[cellKey(e.id, date)];
-      return c && !c.status && (c.tasks || []).some((t) => t.name.trim().toUpperCase() === "IB");
+      return c && !c.status && (c.tasks || []).some((t) => isIbEquivalentTask(t.name));
     }).length;
     return { onIb, total: pool.length, ibPct: Math.round((onIb / total) * 100) };
   };
@@ -5158,7 +5178,7 @@ export default function ManagerSchedule() {
             employees={employees}
             dates={dates}
             cells={cells}
-            timelineDate={timelineDate && dates.includes(timelineDate) ? timelineDate : (dates.find((d) => !isWeekend(d)) || dates[0])}
+            timelineDate={timelineDate && dates.includes(timelineDate) ? timelineDate : defaultTimelineDate(dates)}
             setTimelineDate={setTimelineDate}
             teamColor={teamColor}
             setEditing={setEditing}
