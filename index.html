@@ -3514,7 +3514,7 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
 
   const UploadCard = ({ type, label, hint }) => (
     <label className={`flex-1 min-w-[150px] border-2 rounded-lg px-3 py-4 text-center cursor-pointer transition-colors ${csvFiles[type] ? "border-teal-500 bg-teal-50" : "border-dashed border-slate-300 hover:border-teal-400"}`}>
-      <input type="file" accept=".csv" className="hidden" onChange={(e) => handleCsvFile(type, e.target.files[0])} />
+      <input type="file" accept=".csv" className="hidden" onChange={(e) => { handleCsvFile(type, e.target.files[0]); e.target.value = ""; }} />
       <div className="text-xs font-semibold text-slate-700">{label}</div>
       <div className={`text-[10px] mt-1 ${csvFiles[type] ? "text-teal-700 font-medium" : "text-slate-400"}`}>
         {csvFiles[type] || hint}
