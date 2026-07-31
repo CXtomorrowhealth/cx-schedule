@@ -2712,6 +2712,34 @@ function scorecardNormName(s) { return s.trim().toLowerCase().replace(/:$/, "").
 function scorecardParsePivotProductivity(rows) {
   if (!rows || !rows.length) return null;
   const keys = Object.keys(rows[0]);
+
+  // Newer export: one row per status *interval* rather than one pre-summed row per status —
+  // named columns instead of a fixed Name/Status/Minutes order, durations in seconds, status
+  // codes like "Additional_After_Call_Work" (underscored) instead of "After Call Work", and no
+  // "Total" row at all — total has to be every row's duration summed per person instead.
+  if (keys.includes("User: Full Name") && keys.includes("Service Presence Status: Developer Name") && keys.includes("Status Duration")) {
+    const available = {}, acw = {}, total = {};
+    for (const row of rows) {
+      const nameVal = (row["User: Full Name"] || "").trim();
+      const durVal = parseFloat(row["Status Duration"]);
+      if (!nameVal || isNaN(durVal)) continue;
+      const name = scorecardNormName(nameVal);
+      const statusVal = (row["Service Presence Status: Developer Name"] || "").trim().toLowerCase().replace(/_/g, " ");
+      total[name] = (total[name] || 0) + durVal;
+      if (statusVal === "available") available[name] = (available[name] || 0) + durVal;
+      if (statusVal.includes("after call")) acw[name] = (acw[name] || 0) + durVal;
+    }
+    const result = {};
+    for (const name of Object.keys(total)) {
+      const tot = total[name] || 0;
+      result[name] = {
+        availability: tot > 0 ? parseFloat((((available[name] || 0) / tot) * 100).toFixed(1)) : null,
+        acw: tot > 0 ? parseFloat((((acw[name] || 0) / tot) * 100).toFixed(1)) : null,
+      };
+    }
+    return Object.keys(result).length > 0 ? result : null;
+  }
+
   if (keys.length < 3) return null;
   const nameKey = keys[0], statusKey = keys[1], minutesKey = keys[2];
   const statusWords = ["available", "after call", "interaction", "meeting", "project", "billing", "busy", "edu", "total", "assisting", "additional"];
