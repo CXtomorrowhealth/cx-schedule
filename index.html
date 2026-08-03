@@ -4224,6 +4224,16 @@ export default function ManagerSchedule() {
   const [empPinInput, setEmpPinInput] = useState("");
   const [empPinError, setEmpPinError] = useState(false);
   const modalOpenRef = useRef(false);
+  // Handlers that build a `next` payload from the outer `data`/`cells` closure only see the
+  // data as of THIS render. If a user makes a second edit before React re-renders between the
+  // two (e.g. toggling a status then immediately adding a task, or two blocks patched back to
+  // back), the second call's closure is stale and its persist() silently overwrites the first
+  // edit — which is exactly what "I added a skill + marked OOO and had to go back and redo it"
+  // looks like. dataRef is updated synchronously the instant persist() is called (not on the
+  // next render), so any handler that reads dataRef.current instead of `data`/`cells` always
+  // builds off the truly-latest state, even mid-batch.
+  const dataRef = useRef(data);
+  useEffect(() => { dataRef.current = data; }, [data]);
 
   useEffect(() => {
     (async () => {
@@ -4405,7 +4415,8 @@ export default function ManagerSchedule() {
   const UNDO_LIMIT = 20;
 
   const persist = async (next) => {
-    setUndoStack((stack) => [...stack, data].slice(-UNDO_LIMIT));
+    setUndoStack((stack) => [...stack, dataRef.current].slice(-UNDO_LIMIT));
+    dataRef.current = next;
     setData(next);
     setSaving(true);
     try {
@@ -4423,6 +4434,7 @@ export default function ManagerSchedule() {
     if (undoStack.length === 0) return;
     const prev = undoStack[undoStack.length - 1];
     setUndoStack((stack) => stack.slice(0, -1));
+    dataRef.current = prev;
     setData(prev);
     setSaving(true);
     try {
@@ -4721,9 +4733,10 @@ export default function ManagerSchedule() {
 
   const updateCell = (empId, date, patch) => {
     const key = cellKey(empId, date);
+    const base = dataRef.current;
     const next = {
-      ...data,
-      cells: { ...cells, [key]: { ...(cells[key] || emptyCell()), ...patch } },
+      ...base,
+      cells: { ...base.cells, [key]: { ...(base.cells[key] || emptyCell()), ...patch } },
       updatedAt: Date.now(),
     };
     persist(next);
@@ -4735,11 +4748,12 @@ export default function ManagerSchedule() {
   // Also syncs any "Covered by" onto the covering person's own schedule in the same write.
   const updateBlocks = (empId, date, newBlocks) => {
     const key = cellKey(empId, date);
-    const oldBlocks = (cells[key] && cells[key].blocks) || [];
+    const base = dataRef.current;
+    const oldBlocks = (base.cells[key] && base.cells[key].blocks) || [];
     const synced = syncCoverage(empId, date, oldBlocks, newBlocks);
-    let nextCells = { ...cells, [key]: { ...(cells[key] || emptyCell()), blocks: newBlocks, ...deriveLegacyFieldsFromBlocks(newBlocks) } };
+    let nextCells = { ...base.cells, [key]: { ...(base.cells[key] || emptyCell()), blocks: newBlocks, ...deriveLegacyFieldsFromBlocks(newBlocks) } };
     nextCells = applyCoverageSync(nextCells, date, synced);
-    persist({ ...data, cells: nextCells, updatedAt: Date.now() });
+    persist({ ...base, cells: nextCells, updatedAt: Date.now() });
   };
 
   // Adding several tasks at once (multi-select in TaskBuilder) must go through ONE persist
@@ -4749,20 +4763,21 @@ export default function ManagerSchedule() {
   const addTasks = (empId, date, newTasks) => {
     if (!newTasks.length) return;
     const key = cellKey(empId, date);
-    const current = cells[key] || emptyCell();
+    const current = dataRef.current.cells[key] || emptyCell();
     updateCell(empId, date, { tasks: [...current.tasks, ...newTasks] });
   };
 
   const removeTask = (empId, date, taskId) => {
     const key = cellKey(empId, date);
-    const current = cells[key] || emptyCell();
+    const current = dataRef.current.cells[key] || emptyCell();
     updateCell(empId, date, { tasks: current.tasks.filter((t) => t.id !== taskId) });
   };
 
   const copyCellToDates = (empId, sourceDate, targetDates) => {
-    const raw = cells[cellKey(empId, sourceDate)];
+    const base = dataRef.current;
+    const raw = base.cells[cellKey(empId, sourceDate)];
     const sourceCell = raw ? normalizeCell(raw) : emptyCell();
-    const nextCells = { ...cells };
+    const nextCells = { ...base.cells };
     targetDates.forEach((d) => {
       nextCells[cellKey(empId, d)] = {
         ...sourceCell,
@@ -4770,12 +4785,13 @@ export default function ManagerSchedule() {
         blocks: Array.isArray(sourceCell.blocks) ? sourceCell.blocks.map((b) => ({ ...b })) : sourceCell.blocks,
       };
     });
-    persist({ ...data, cells: nextCells, updatedAt: Date.now() });
+    persist({ ...base, cells: nextCells, updatedAt: Date.now() });
   };
 
   const updateEmployee = (empId, field, value) => {
-    const nextEmployees = employees.map((e) => e.id === empId ? { ...e, [field]: value } : e);
-    persist({ ...data, employees: nextEmployees, updatedAt: Date.now() });
+    const base = dataRef.current;
+    const nextEmployees = base.employees.map((e) => e.id === empId ? { ...e, [field]: value } : e);
+    persist({ ...base, employees: nextEmployees, updatedAt: Date.now() });
   };
 
   const regeneratePin = (empId) => {
@@ -4789,9 +4805,10 @@ export default function ManagerSchedule() {
   // anyone missing one (their default code if we have one on file, otherwise a fresh random
   // one), all in a single persist call so nothing overwrites anything else.
   const fillMissingPins = () => {
-    const used = new Set(employees.filter((e) => e.pin).map((e) => e.pin));
+    const base = dataRef.current;
+    const used = new Set(base.employees.filter((e) => e.pin).map((e) => e.pin));
     let changed = false;
-    const nextEmployees = employees.map((e) => {
+    const nextEmployees = base.employees.map((e) => {
       if (e.pin) return e;
       changed = true;
       let pin = DEFAULT_PINS[e.id];
@@ -4802,23 +4819,24 @@ export default function ManagerSchedule() {
       return { ...e, pin };
     });
     if (!changed) return;
-    persist({ ...data, employees: nextEmployees, updatedAt: Date.now() });
+    persist({ ...base, employees: nextEmployees, updatedAt: Date.now() });
   };
 
   const clearSecurityLog = () => {
-    persist({ ...data, securityLog: [], updatedAt: Date.now() });
+    persist({ ...dataRef.current, securityLog: [], updatedAt: Date.now() });
   };
 
   const addEmployee = () => {
     if (!newEmpName.trim()) return;
     const id = newEmpName.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    if (employees.some((e) => e.id === id)) { setAddingEmp(false); return; }
-    const used = new Set(employees.filter((e) => e.pin).map((e) => e.pin));
+    const base = dataRef.current;
+    if (base.employees.some((e) => e.id === id)) { setAddingEmp(false); return; }
+    const used = new Set(base.employees.filter((e) => e.pin).map((e) => e.pin));
     let pin;
     do { pin = String(Math.floor(1000 + Math.random() * 9000)); } while (used.has(pin));
     const next = {
-      ...data,
-      employees: [...employees, { id, name: newEmpName.trim(), team: newEmpTeam.trim(), pin }],
+      ...base,
+      employees: [...base.employees, { id, name: newEmpName.trim(), team: newEmpTeam.trim(), pin }],
       updatedAt: Date.now(),
     };
     persist(next);
@@ -4826,18 +4844,19 @@ export default function ManagerSchedule() {
   };
 
   const removeEmployee = (empId) => {
-    const nextCells = { ...cells };
-    dates.forEach((d) => delete nextCells[cellKey(empId, d)]);
-    const nextTimeOff = { ...timeOff };
+    const base = dataRef.current;
+    const nextCells = { ...base.cells };
+    (base.dates || []).forEach((d) => delete nextCells[cellKey(empId, d)]);
+    const nextTimeOff = { ...(base.timeOff || {}) };
     delete nextTimeOff[empId];
-    const nextQaEvals = { ...(data.qaEvals || {}) };
+    const nextQaEvals = { ...(base.qaEvals || {}) };
     delete nextQaEvals[empId];
-    const nextPtoNotes = { ...(data.ptoEvalNotes || {}) };
+    const nextPtoNotes = { ...(base.ptoEvalNotes || {}) };
     delete nextPtoNotes[empId];
-    const nextTimeOffDates = (data.timeOffDates || []).filter((td) => td.empId !== empId);
+    const nextTimeOffDates = (base.timeOffDates || []).filter((td) => td.empId !== empId);
     persist({
-      ...data,
-      employees: employees.filter((e) => e.id !== empId),
+      ...base,
+      employees: base.employees.filter((e) => e.id !== empId),
       cells: nextCells,
       timeOff: nextTimeOff,
       qaEvals: nextQaEvals,
@@ -4854,32 +4873,37 @@ export default function ManagerSchedule() {
 
   const addDate = () => {
     if (!newDate || dates.includes(newDate)) { setAddingDate(false); return; }
-    persist({ ...addDateTo(data, newDate), updatedAt: Date.now() });
+    persist({ ...addDateTo(dataRef.current, newDate), updatedAt: Date.now() });
     setNewDate(""); setAddingDate(false);
   };
 
   const removeDate = (date) => {
-    const nextCells = { ...cells };
-    employees.forEach((e) => delete nextCells[cellKey(e.id, date)]);
-    persist({ ...data, dates: dates.filter((d) => d !== date), cells: nextCells, updatedAt: Date.now() });
+    const base = dataRef.current;
+    const nextCells = { ...base.cells };
+    base.employees.forEach((e) => delete nextCells[cellKey(e.id, date)]);
+    persist({ ...base, dates: base.dates.filter((d) => d !== date), cells: nextCells, updatedAt: Date.now() });
   };
 
   const updateTimeOff = (empId, field, value) => {
-    const current = timeOff[empId] || { allPto: 0, allSick: 0, pastPto: 0, pastSick: 0, upcomingPto: 0, upcomingSick: 0 };
+    const base = dataRef.current;
+    const baseTimeOff = base.timeOff || {};
+    const current = baseTimeOff[empId] || { allPto: 0, allSick: 0, pastPto: 0, pastSick: 0, upcomingPto: 0, upcomingSick: 0 };
     const num = value === "" ? 0 : parseFloat(value);
-    persist({ ...data, timeOff: { ...timeOff, [empId]: { ...current, [field]: isNaN(num) ? 0 : num } }, updatedAt: Date.now() });
+    persist({ ...base, timeOff: { ...baseTimeOff, [empId]: { ...current, [field]: isNaN(num) ? 0 : num } }, updatedAt: Date.now() });
   };
 
   const updatePtoNote = (empId, text) => {
-    persist({ ...data, ptoEvalNotes: { ...(data.ptoEvalNotes || {}), [empId]: text }, updatedAt: Date.now() });
+    const base = dataRef.current;
+    persist({ ...base, ptoEvalNotes: { ...(base.ptoEvalNotes || {}), [empId]: text }, updatedAt: Date.now() });
   };
 
   const updateQaEval = (empId, monthKey, field, value) => {
-    const empMonths = data.qaEvals?.[empId] || {};
+    const base = dataRef.current;
+    const empMonths = base.qaEvals?.[empId] || {};
     const current = empMonths[monthKey] || {};
     persist({
-      ...data,
-      qaEvals: { ...(data.qaEvals || {}), [empId]: { ...empMonths, [monthKey]: { ...current, [field]: value } } },
+      ...base,
+      qaEvals: { ...(base.qaEvals || {}), [empId]: { ...empMonths, [monthKey]: { ...current, [field]: value } } },
       updatedAt: Date.now(),
     });
   };
@@ -4888,28 +4912,31 @@ export default function ManagerSchedule() {
   // updateQaEval repeatedly in a loop would have each call read the same stale `data`, so only
   // the last field written would actually stick. Used by the CSV-generate flow.
   const updateQaEvalBatch = (monthKey, patchesByEmpId) => {
-    const nextQaEvals = { ...(data.qaEvals || {}) };
+    const base = dataRef.current;
+    const nextQaEvals = { ...(base.qaEvals || {}) };
     Object.entries(patchesByEmpId).forEach(([empId, patch]) => {
       const empMonths = nextQaEvals[empId] || {};
       nextQaEvals[empId] = { ...empMonths, [monthKey]: { ...(empMonths[monthKey] || {}), ...patch } };
     });
-    persist({ ...data, qaEvals: nextQaEvals, updatedAt: Date.now() });
+    persist({ ...base, qaEvals: nextQaEvals, updatedAt: Date.now() });
   };
 
   const addTimeOffDate = (entry) => {
-    const nextCells = { ...cells };
+    const base = dataRef.current;
+    const nextCells = { ...base.cells };
     const mappedStatus = TIMEOFF_LABEL_TO_STATUS[entry.label];
     if (mappedStatus) {
       const key = cellKey(entry.empId, entry.date);
       const current = nextCells[key] || emptyCell();
       nextCells[key] = { ...current, status: mappedStatus, statusScope: "allday", statusStart: "", statusEnd: "" };
     }
-    persist({ ...data, timeOffDates: [...(data.timeOffDates || []), entry], cells: nextCells, updatedAt: Date.now() });
+    persist({ ...base, timeOffDates: [...(base.timeOffDates || []), entry], cells: nextCells, updatedAt: Date.now() });
   };
 
   const removeTimeOffDate = (entryId) => {
-    const entry = (data.timeOffDates || []).find((e) => e.id === entryId);
-    const nextCells = { ...cells };
+    const base = dataRef.current;
+    const entry = (base.timeOffDates || []).find((e) => e.id === entryId);
+    const nextCells = { ...base.cells };
     if (entry) {
       const key = cellKey(entry.empId, entry.date);
       const current = nextCells[key];
@@ -4919,7 +4946,7 @@ export default function ManagerSchedule() {
         nextCells[key] = { ...current, status: "" };
       }
     }
-    persist({ ...data, timeOffDates: (data.timeOffDates || []).filter((e) => e.id !== entryId), cells: nextCells, updatedAt: Date.now() });
+    persist({ ...base, timeOffDates: (base.timeOffDates || []).filter((e) => e.id !== entryId), cells: nextCells, updatedAt: Date.now() });
   };
 
   // One-click bridge from the Schedule tab to the Time Off tab: log a block set here as a
@@ -4929,13 +4956,14 @@ export default function ManagerSchedule() {
     if (!label) return;
     const entry = { id: `td${Date.now()}`, empId: editing.empId, date: editing.date, label };
     if (comment && comment.trim()) entry.comment = comment.trim();
-    persist({ ...data, timeOffDates: [...(data.timeOffDates || []), entry], updatedAt: Date.now() });
+    const base = dataRef.current;
+    persist({ ...base, timeOffDates: [...(base.timeOffDates || []), entry], updatedAt: Date.now() });
     setTdSuggestComment((p) => { const next = { ...p }; delete next[block.id]; return next; });
   };
 
   const submitLogTimeOff = () => {
     if (!logTimeOff || !logDate) return;
-    let next = addDateTo(data, logDate);
+    let next = addDateTo(dataRef.current, logDate);
     const key = cellKey(logTimeOff, logDate);
     const hours = logScope === "partial" ? hoursBetween(logStart, logEnd) : (logHours === "" ? "" : logHours);
 
@@ -4981,18 +5009,21 @@ export default function ManagerSchedule() {
   };
 
   const updateHolidayField = (holidayId, field, value) => {
-    const nextHolidays = holidays.map((h) => h.id === holidayId ? { ...h, [field]: value } : h);
-    persist({ ...data, holidays: nextHolidays, updatedAt: Date.now() });
+    const base = dataRef.current;
+    const nextHolidays = (base.holidays || []).map((h) => h.id === holidayId ? { ...h, [field]: value } : h);
+    persist({ ...base, holidays: nextHolidays, updatedAt: Date.now() });
   };
 
   const updateMetric = (holidayId, field, value) => {
-    const nextHolidays = holidays.map((h) => h.id === holidayId ? { ...h, metrics: { ...h.metrics, [field]: value } } : h);
-    persist({ ...data, holidays: nextHolidays, updatedAt: Date.now() });
+    const base = dataRef.current;
+    const nextHolidays = (base.holidays || []).map((h) => h.id === holidayId ? { ...h, metrics: { ...h.metrics, [field]: value } } : h);
+    persist({ ...base, holidays: nextHolidays, updatedAt: Date.now() });
   };
 
   const updateStandingCoverage = (ruleId, field, value) => {
-    const nextRules = (data.standingCoverage || []).map((r) => r.id === ruleId ? { ...r, [field]: value } : r);
-    persist({ ...data, standingCoverage: nextRules, updatedAt: Date.now() });
+    const base = dataRef.current;
+    const nextRules = (base.standingCoverage || []).map((r) => r.id === ruleId ? { ...r, [field]: value } : r);
+    persist({ ...base, standingCoverage: nextRules, updatedAt: Date.now() });
   };
   const toggleStandingCoverageWeekday = (ruleId, weekday) => {
     const rule = (data.standingCoverage || []).find((r) => r.id === ruleId);
@@ -5011,12 +5042,13 @@ export default function ManagerSchedule() {
     if (!empId) return;
     const tid = `sc-${rule.id}-${date}`;
     const bid = `scblk-${rule.id}-${date}`;
-    const ruleEmp = employees.find((e) => e.id === rule.assigneeId);
+    const base = dataRef.current;
+    const ruleEmp = base.employees.find((e) => e.id === rule.assigneeId);
     const coveringFor = ruleEmp && ruleEmp.id !== empId ? ruleEmp.name.split(" ")[0] : null;
-    let nextCells = { ...cells };
+    let nextCells = { ...base.cells };
 
     // Move the slot off anyone else who currently has it (reassignment).
-    employees.forEach((e) => {
+    base.employees.forEach((e) => {
       if (e.id === empId) return;
       const k = cellKey(e.id, date);
       const c = nextCells[k];
@@ -5037,7 +5069,7 @@ export default function ManagerSchedule() {
     const task = { id: tid, name: rule.label, ...(coveringFor ? { coveringFor } : {}), scope: "partial", start: rule.start, end: rule.end };
     const nextTasks = [...(cell.tasks || []).filter((t) => t.id !== tid), task];
     let patch = { tasks: nextTasks };
-    const existingBlocks = getCellBlocks(cell, employees.find((e) => e.id === empId)?.shiftStart, employees.find((e) => e.id === empId)?.shiftEnd).map((b) => ({ ...b }));
+    const existingBlocks = getCellBlocks(cell, base.employees.find((e) => e.id === empId)?.shiftStart, base.employees.find((e) => e.id === empId)?.shiftEnd).map((b) => ({ ...b }));
     const alreadyWorking = existingBlocks.some((b) => b.id !== bid && b.type === "Working" && b.start && b.end && toMinutes(b.start) <= toMinutes(rule.start) && toMinutes(b.end) >= toMinutes(rule.end));
     if (!alreadyWorking) {
       const newBlock = { id: bid, type: "Working", start: rule.start, end: rule.end, ...(coveringFor ? { coverageLabel: rule.label, coveringFor } : {}) };
@@ -5048,22 +5080,25 @@ export default function ManagerSchedule() {
       patch = { tasks: nextTasks, blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) };
     }
     nextCells[key] = { ...cell, ...patch };
-    persist({ ...data, cells: nextCells, updatedAt: Date.now() });
+    persist({ ...base, cells: nextCells, updatedAt: Date.now() });
   };
 
   const addVolunteer = (holidayId, volunteer) => {
-    const nextHolidays = holidays.map((h) => h.id === holidayId ? { ...h, volunteers: [...(h.volunteers || []), volunteer] } : h);
-    persist({ ...data, holidays: nextHolidays, updatedAt: Date.now() });
+    const base = dataRef.current;
+    const nextHolidays = (base.holidays || []).map((h) => h.id === holidayId ? { ...h, volunteers: [...(h.volunteers || []), volunteer] } : h);
+    persist({ ...base, holidays: nextHolidays, updatedAt: Date.now() });
   };
 
   const removeVolunteer = (holidayId, volunteerId) => {
-    const nextHolidays = holidays.map((h) => h.id === holidayId ? { ...h, volunteers: (h.volunteers || []).filter((v) => v.id !== volunteerId) } : h);
-    persist({ ...data, holidays: nextHolidays, updatedAt: Date.now() });
+    const base = dataRef.current;
+    const nextHolidays = (base.holidays || []).map((h) => h.id === holidayId ? { ...h, volunteers: (h.volunteers || []).filter((v) => v.id !== volunteerId) } : h);
+    persist({ ...base, holidays: nextHolidays, updatedAt: Date.now() });
   };
 
   const updateVolunteer = (holidayId, volunteerId, field, value) => {
-    const nextHolidays = holidays.map((h) => h.id === holidayId ? { ...h, volunteers: (h.volunteers || []).map((v) => v.id === volunteerId ? { ...v, [field]: value } : v) } : h);
-    persist({ ...data, holidays: nextHolidays, updatedAt: Date.now() });
+    const base = dataRef.current;
+    const nextHolidays = (base.holidays || []).map((h) => h.id === holidayId ? { ...h, volunteers: (h.volunteers || []).map((v) => v.id === volunteerId ? { ...v, [field]: value } : v) } : h);
+    persist({ ...base, holidays: nextHolidays, updatedAt: Date.now() });
   };
 
   const editEmp = editing ? employees.find((e) => e.id === editing.empId) : null;
