@@ -1594,15 +1594,45 @@ function resolveCoverage(rule, date, employees, cells) {
 
 function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, teamColor, setEditing, removeDate, removeEmployee, timeOffDates, standingCoverage, assignCoverageForDate }) {
   const [rowPicker, setRowPicker] = useState(null); // date string of the pill currently showing its assign dropdown
-  const weeks = [];
-  for (let i = 0; i < dates.length; i += 7) weeks.push(dates.slice(i, i + 7));
+
+  // Group into real Mon-Sun calendar weeks rather than just slicing every 7 array entries —
+  // one-off future dates added via "+ Add date" (e.g. a single Thursday two months out) don't
+  // fill out a full week, and chunking by array position alone crams unrelated dates from
+  // different weeks into the same row with no regard for which weekday column they actually
+  // belong in. Padding missing weekdays with a blank slot keeps every row a real calendar week,
+  // so a Thursday always lands in the Thursday column even if it's the only date that week.
+  const mondayOf = (dateStr) => {
+    const d = new Date(dateStr + "T00:00:00");
+    const day = d.getDay();
+    d.setDate(d.getDate() + (day === 0 ? -6 : 1 - day));
+    return d.toISOString().slice(0, 10);
+  };
+  const weekGroups = [];
+  const weekIndexByStart = {};
+  dates.forEach((d) => {
+    const start = mondayOf(d);
+    if (!(start in weekIndexByStart)) {
+      weekIndexByStart[start] = weekGroups.length;
+      weekGroups.push({ start, slots: Array(7).fill(null) });
+    }
+    const dt = new Date(d + "T00:00:00");
+    const weekday = dt.getDay();
+    const col = weekday === 0 ? 6 : weekday - 1; // Mon=0 ... Sun=6
+    weekGroups[weekIndexByStart[start]].slots[col] = d;
+  });
+  const weeks = weekGroups.filter((w) => w.slots.every(Boolean)).map((w) => w.slots);
+  // Anything from a week that isn't fully populated (e.g. a single one-off date added via
+  // "+ Add date" two months out) doesn't get a mostly-blank grid row of its own — it drops into
+  // one flat, packed strip at the bottom instead, so nothing ever looks sparse.
+  const extraDates = weekGroups.filter((w) => !w.slots.every(Boolean)).flatMap((w) => w.slots.filter(Boolean));
   const hasCoverage = Array.isArray(standingCoverage) && standingCoverage.length > 0;
   return (
     <div>
       {weeks.map((week, wi) => (
         <div key={wi}>
           <div className="px-4 sm:px-6 py-3 grid grid-cols-7 gap-1.5 border-b" style={{ borderColor: TH.border }}>
-            {week.map((d) => {
+            {week.map((d, col) => {
+              if (!d) return <div key={col} />;
               const dt = new Date(d + "T00:00:00");
               const weekend = isTrulyOffDay(d, employees);
               const active = d === timelineDate;
@@ -1635,7 +1665,8 @@ function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, 
               so a pill always lines up with the date above it. */}
           {hasCoverage && (
             <div className="px-4 sm:px-6 py-2 grid grid-cols-7 gap-1.5 border-b" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
-              {week.map((d) => {
+              {week.map((d, col) => {
+                if (!d) return <div key={col} />;
                 const weekday = new Date(d + "T00:00:00").getDay();
                 const rule = standingCoverage.find((r) => r.weekdays.includes(weekday));
                 if (!rule) return <div key={d} />;
@@ -1680,6 +1711,39 @@ function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, 
           )}
         </div>
       ))}
+
+      {extraDates.length > 0 && (
+        <div className="px-4 sm:px-6 py-3 border-b" style={{ borderColor: TH.border }}>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-2">Additional dates</div>
+          <div className="flex flex-wrap gap-1.5">
+            {extraDates.map((d) => {
+              const dt = new Date(d + "T00:00:00");
+              const active = d === timelineDate;
+              const hasTimeOff = (timeOffDates || []).some((td) => td.date === d);
+              return (
+                <button
+                  key={d}
+                  onClick={() => setTimelineDate(d)}
+                  className="relative text-center rounded-lg px-3 py-1.5 text-[11px] font-semibold group"
+                  style={active ? { backgroundColor: TH.navy, color: "#fff" } : { backgroundColor: "#f4f6f8", color: TH.textMid }}
+                >
+                  <span
+                    onClick={(e) => { e.stopPropagation(); removeDate(d); }}
+                    className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 rounded-full bg-white border border-slate-300 text-slate-400 hover:text-rose-500 hover:border-rose-300 items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hidden sm:flex"
+                  >
+                    <X className="w-2.5 h-2.5" />
+                  </span>
+                  {hasTimeOff && (
+                    <span className="absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-amber-400" title="Time off logged this day" />
+                  )}
+                  <span>{dt.toLocaleDateString("en-US", { month: "numeric", day: "numeric" })}</span>
+                  <span className="ml-1 opacity-80 uppercase tracking-wide text-[9px]">{dt.toLocaleDateString("en-US", { weekday: "short" })}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="px-4 sm:px-6 pt-3 flex items-center gap-3" style={{ borderLeft: "4px solid transparent", paddingLeft: "10px" }}>
         <div className="w-36 shrink-0" />
