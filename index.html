@@ -2627,20 +2627,33 @@ const QA_OVERALL_TONE = {
   average: "bg-amber-50 text-amber-800 border-amber-200",
   needs: "bg-rose-50 text-rose-800 border-rose-200",
 };
-function qaOverallLabel(o) {
+function qaOverallLabel(o, showPercentile = true) {
   if (o == null) return { text: "Not enough data yet", tone: "average" };
-  if (o >= 70) return { text: `Strong · ${o}th %ile`, tone: "strong" };
-  if (o >= 50) return { text: `Good · ${o}th %ile`, tone: "good" };
-  if (o >= 35) return { text: `Average · ${o}th %ile`, tone: "average" };
-  return { text: `Needs work · ${o}th %ile`, tone: "needs" };
+  const suffix = showPercentile ? ` · ${o}th %ile` : "";
+  if (o >= 70) return { text: `Strong${suffix}`, tone: "strong" };
+  if (o >= 50) return { text: `Good${suffix}`, tone: "good" };
+  if (o >= 35) return { text: `Average${suffix}`, tone: "average" };
+  return { text: `Needs work${suffix}`, tone: "needs" };
 }
 
-function qaOverallScore(ev, allTickets, allAvail, allQa) {
-  const scores = [];
-  if (ev.tickets != null) { const p = qaPercentile(allTickets, ev.tickets); if (p != null) scores.push(p); }
-  if (ev.availablePct != null) { const p = qaPercentile(allAvail, ev.availablePct); if (p != null) scores.push(p); }
-  if (ev.qa != null) { const p = qaPercentile(allQa, ev.qa); if (p != null) scores.push(p); }
-  return scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+// Combines all four factors into one score by ranking this person's number against the rest of
+// the team that month (percentile), then taking a weighted average of the percentiles — so it
+// reads as "how did I do relative to my teammates" rather than against a fixed target. ACW is
+// "lower is better," the other three are "higher is better," so its percentile gets inverted
+// (100 - p) before averaging — a low ACW% should pull the combined score UP, not down.
+// QA counts for more than any single productivity metric — 55% of the combined score, with the
+// remaining 45% split evenly across Tickets/hr, Available%, and ACW (15% each). If a factor is
+// missing for someone that month (e.g. tickets-exempt), its weight just drops out and the rest
+// renormalize proportionally — so a missing metric never silently zeros someone out.
+const CA_OVERALL_WEIGHTS = { qa: 0.55, tickets: 0.15, availablePct: 0.15, acw: 0.15 };
+function qaOverallScore(ev, allTickets, allAvail, allQa, allAcw) {
+  let weightedSum = 0, weightTotal = 0;
+  const add = (key, p) => { if (p == null) return; weightedSum += p * CA_OVERALL_WEIGHTS[key]; weightTotal += CA_OVERALL_WEIGHTS[key]; };
+  if (ev.tickets != null) add("tickets", qaPercentile(allTickets, ev.tickets));
+  if (ev.availablePct != null) add("availablePct", qaPercentile(allAvail, ev.availablePct));
+  if (ev.qa != null) add("qa", qaPercentile(allQa, ev.qa));
+  if (ev.acw != null && allAcw) { const p = qaPercentile(allAcw, ev.acw); if (p != null) add("acw", 100 - p); }
+  return weightTotal > 0 ? Math.round(weightedSum / weightTotal) : null;
 }
 
 // Same bullet logic as the standalone tool's analyzeAgent(), just returning plain strings.
@@ -2952,6 +2965,9 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
 
   const allQaVals = monthEntries.map((x) => numOrNull(x.raw.qa)).filter((v) => v != null);
   const avgQa = allQaVals.length ? allQaVals.reduce((a, b) => a + b, 0) / allQaVals.length : 0;
+  const allTicketVals = monthEntries.filter((x) => !x.emp.ticketsExempt).map((x) => numOrNull(x.raw.tickets)).filter((v) => v != null);
+  const allAvailVals = monthEntries.map((x) => numOrNull(x.raw.availablePct)).filter((v) => v != null);
+  const allAcwVals = monthEntries.map((x) => numOrNull(x.raw.acw)).filter((v) => v != null);
 
   let pageNum = 0;
   const drawTopHeader = () => {
@@ -3010,6 +3026,31 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
     y += 26;
 
     const ev = { tickets: numOrNull(raw.tickets), availablePct: numOrNull(raw.availablePct), acw: numOrNull(raw.acw), qa: numOrNull(raw.qa) };
+
+    // Combined Overall score — same formula as the manager-only CA Eval tab (percentile rank on
+    // each factor, averaged, ACW inverted since lower is better), but this PDF goes to the
+    // employee, so it deliberately shows just the tier word ("Good") and never the raw
+    // percentile or any "vs your teammates" framing — that comparison stays in CA Eval only.
+    const overall = qaOverallScore(ev, allTicketVals, allAvailVals, allQaVals, allAcwVals);
+    if (overall != null) {
+      const tone = qaOverallLabel(overall, false);
+      const OVERALL_TONE_RGB = { strong: [0, 168, 120], good: [59, 130, 246], average: [217, 119, 6], needs: [225, 29, 72] };
+      const trgb = OVERALL_TONE_RGB[tone.tone] || OVERALL_TONE_RGB.average;
+      const boxH = 20;
+      doc.setDrawColor(9, 26, 41); doc.setLineWidth(0.6);
+      doc.roundedRect(margin, y, pw - margin * 2, boxH, 2, 2, "S");
+      doc.setTextColor(9, 26, 41); doc.setFontSize(8.5); doc.setFont("helvetica", "bold");
+      doc.text("OVERALL SCORE", margin + 5, y + 8);
+      doc.setFontSize(17);
+      doc.text(String(overall), pw - margin - 5, y + 10, "right");
+      const barX2 = margin + 5, barW2 = pw - margin * 2 - 34, barY2 = y + 13;
+      doc.setFillColor(232, 236, 240); doc.roundedRect(barX2, barY2, barW2, 4, 1, 1, "F");
+      const fillW2 = Math.min(overall / 100, 1) * barW2;
+      doc.setFillColor(...trgb); if (fillW2 > 0.5) doc.roundedRect(barX2, barY2, fillW2, 4, 1, 1, "F");
+      doc.setTextColor(...trgb); doc.setFontSize(7.5); doc.setFont("helvetica", "bold");
+      doc.text(tone.text, pw - margin - 5, y + 8, "right");
+      y += boxH + 6;
+    }
 
     doc.setTextColor(140, 155, 170); doc.setFontSize(7); doc.setFont("helvetica", "bold");
     doc.text("PERFORMANCE SCORES", margin, y);
@@ -3784,10 +3825,11 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
   const allTickets = evaluated.filter((r) => !r.emp.ticketsExempt).map((r) => r.ev.tickets).filter((v) => v != null);
   const allAvail = evaluated.map((r) => r.ev.availablePct).filter((v) => v != null);
   const allQa = evaluated.map((r) => r.ev.qa).filter((v) => v != null);
+  const allAcw = evaluated.map((r) => r.ev.acw).filter((v) => v != null);
   const avgTickets = avg(allTickets), avgAvail = avg(allAvail), avgQaVal = avg(allQa);
 
   const fullyEvaluated = evaluated.map((r) => {
-    const overall = qaOverallScore(r.ev, allTickets, allAvail, allQa);
+    const overall = qaOverallScore(r.ev, allTickets, allAvail, allQa, allAcw);
     const label = qaOverallLabel(overall);
     const { highlights, improvements, coaching } = analyzeCaEval(r.ev, avgQaVal);
     return { ...r, overall, label, highlights, improvements, coaching };
