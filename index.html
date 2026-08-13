@@ -389,7 +389,15 @@ function subtractInterval(shiftStart, shiftEnd, cutStart, cutEnd) {
 
 // The employee's actual on-the-clock windows for a cell — every Working-type block's own
 // start/end. A day with no Working blocks at all (full-day OOO/PTO/etc.) returns none.
-function employeeWorkingWindows(cell, empShiftStart, empShiftEnd) {
+// An untouched cell (no status, no blocks) defaults to the employee's usual shift — but only
+// when the date is actually one of their scheduled workdays. Without isScheduledDay, this
+// defaulted an empty cell on someone's day OFF to "working their normal hours" too, which fed
+// wrong numbers into the Team Overview IB heatmap and the standing-coverage auto-fill (both
+// treated a non-workday as if the person were on shift, just because nobody had ever touched
+// that cell to explicitly mark it "not scheduled").
+function employeeWorkingWindows(cell, empShiftStart, empShiftEnd, isScheduledDay = true) {
+  const isBlank = !cell || (!cell.status && !(cell.blocks && cell.blocks.length));
+  if (isBlank && !isScheduledDay) return [];
   const blocks = getCellBlocks(cell, empShiftStart, empShiftEnd);
   return blocks.filter((b) => b.type === "Working" && b.start && b.end).map((b) => [b.start, b.end]);
 }
@@ -402,8 +410,8 @@ function rangesOverlap(aStart, aEnd, bStart, bEnd) {
 
 // Used for standing-coverage auto-fill: is this person actually on the clock at all during
 // the given window that day (accounts for OOO/Sick/etc. blocks shrinking their working time)?
-function isAvailableForWindow(cell, empShiftStart, empShiftEnd, winStart, winEnd) {
-  return employeeWorkingWindows(cell, empShiftStart, empShiftEnd).some(([s, e]) => rangesOverlap(s, e, winStart, winEnd));
+function isAvailableForWindow(cell, empShiftStart, empShiftEnd, winStart, winEnd, isScheduledDay = true) {
+  return employeeWorkingWindows(cell, empShiftStart, empShiftEnd, isScheduledDay).some(([s, e]) => rangesOverlap(s, e, winStart, winEnd));
 }
 
 // Windows during which an "IB" task applies, before intersecting with actual working time.
@@ -593,7 +601,8 @@ function ensureStandingCoverageTasks(dataObj) {
       const cell = nextCells[key] || emptyCell();
       const alreadyHas = (cell.tasks || []).some((t) => t.name === rule.label && t.start === rule.start && t.end === rule.end);
       if (alreadyHas) return;
-      if (!isAvailableForWindow(cell, emp.shiftStart, emp.shiftEnd, rule.start, rule.end)) return; // leave as a gap
+      const isScheduledDay = !emp.workDays || emp.workDays.length === 0 || emp.workDays.includes(weekday);
+      if (!isAvailableForWindow(cell, emp.shiftStart, emp.shiftEnd, rule.start, rule.end, isScheduledDay)) return; // leave as a gap
       changed = true;
       nextCells[key] = { ...cell, tasks: [...(cell.tasks || []), { id: `sc-${rule.id}-${date}`, name: rule.label, scope: "partial", start: rule.start, end: rule.end }] };
     });
@@ -2196,11 +2205,13 @@ function OverviewTab({ employees, dates, cells, coverageStats, ibCoverageStats }
   const SINGLE_COVERAGE_HOURS = [8, 17, 18, 19];
   const ibHourlyStats = (date, hour) => {
     const hourStart = hour * 60, hourEnd = (hour + 1) * 60;
+    const weekday = new Date(date + "T00:00:00").getDay();
     let working = 0, onIb = 0;
     const ibNames = [], workingOnlyNames = [];
     employees.forEach((emp) => {
       const c = cells[cellKey(emp.id, date)];
-      const workingWindows = employeeWorkingWindows(c, emp.shiftStart, emp.shiftEnd);
+      const isScheduledDay = !emp.workDays || emp.workDays.length === 0 || emp.workDays.includes(weekday);
+      const workingWindows = employeeWorkingWindows(c, emp.shiftStart, emp.shiftEnd, isScheduledDay);
       const onShiftThisHour = workingWindows.some(([s, e]) => {
         const sM = toMinutes(s), eM = toMinutes(e);
         return sM !== null && eM !== null && sM < hourEnd && eM > hourStart;
@@ -4720,7 +4731,13 @@ export default function ManagerSchedule() {
   );
 
   const coverageStats = (date, team) => {
-    const pool = team ? employees.filter((e) => e.team === team) : employees;
+    const weekday = new Date(date + "T00:00:00").getDay();
+    let pool = team ? employees.filter((e) => e.team === team) : employees;
+    // Someone whose day off it is isn't "working" AND isn't "OOO" — they're simply not part of
+    // today's picture at all. Counting them as "working" (an untouched cell's status defaults to
+    // "") was quietly inflating Working Today % and understating OOO Today % on everyone's
+    // regular days off.
+    pool = pool.filter((e) => !e.workDays || e.workDays.length === 0 || e.workDays.includes(weekday));
     const total = pool.length || 1;
     const working = pool.filter((e) => (cells[cellKey(e.id, date)]?.status || "") === "").length;
     const ooo = total - working;
