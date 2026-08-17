@@ -1794,8 +1794,14 @@ function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, 
                 <div className="w-36 shrink-0 pt-0.5">
                   <div className="text-sm font-medium text-slate-900">{emp.name}</div>
                   {loggedTimeOff && (
-                    <div className="flex items-center gap-1 mt-1 text-[9px] font-semibold text-amber-700" title="Logged on the Time Off tab — make sure the schedule here matches">
-                      <AlertTriangle className="w-2.5 h-2.5 shrink-0" /> {loggedTimeOff.label} logged
+                    <div className="mt-1 text-[9px] font-semibold text-amber-700" title="Logged on the Time Off tab — make sure the schedule here matches">
+                      <div className="flex items-center gap-1">
+                        <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+                        {loggedTimeOff.label} logged{c.hours ? ` · ${c.hours}h` : ""}
+                      </div>
+                      {loggedTimeOff.comment && (
+                        <div className="text-amber-600 font-normal italic mt-0.5 leading-snug">"{loggedTimeOff.comment}"</div>
+                      )}
                     </div>
                   )}
                 </div>
