@@ -2644,33 +2644,40 @@ const QA_OVERALL_TONE = {
   average: "bg-amber-50 text-amber-800 border-amber-200",
   needs: "bg-rose-50 text-rose-800 border-rose-200",
 };
-function qaOverallLabel(o, showPercentile = true) {
+function qaOverallLabel(o) {
   if (o == null) return { text: "Not enough data yet", tone: "average" };
-  const suffix = showPercentile ? ` · ${o}th %ile` : "";
-  if (o >= 70) return { text: `Strong${suffix}`, tone: "strong" };
-  if (o >= 50) return { text: `Good${suffix}`, tone: "good" };
-  if (o >= 35) return { text: `Average${suffix}`, tone: "average" };
-  return { text: `Needs work${suffix}`, tone: "needs" };
+  if (o >= 85) return { text: "Strong", tone: "strong" };
+  if (o >= 70) return { text: "Good", tone: "good" };
+  if (o >= 55) return { text: "Average", tone: "average" };
+  return { text: "Needs work", tone: "needs" };
 }
 
-// Combines all four factors into one score by ranking this person's number against the rest of
-// the team that month (percentile), then taking a weighted average of the percentiles — so it
-// reads as "how did I do relative to my teammates" rather than against a fixed target. ACW is
-// "lower is better," the other three are "higher is better," so its percentile gets inverted
-// (100 - p) before averaging — a low ACW% should pull the combined score UP, not down.
-// QA counts for more than any single productivity metric — 55% of the combined score, with the
-// remaining 45% split evenly across Tickets/hr, Available%, and ACW (15% each). If a factor is
-// missing for someone that month (e.g. tickets-exempt), its weight just drops out and the rest
-// renormalize proportionally — so a missing metric never silently zeros someone out.
+// Individual, target-based score — NOT ranked against teammates. Each factor is converted to
+// its own 0-100 score against its own fixed benchmark, using the same benchmarks the badges
+// already use, so this always reads as "how close to the goal," never "better/worse than
+// coworkers": Tickets/hr as % of the CA_TICKET_BENCHMARK goal (capped at 100 for exceeding it),
+// Available% used directly (it's already 0-100 and the 50% target lines up naturally), ACW%
+// inverted (100 - ACW, since lower is better), QA used directly (already 0-100). Weighted
+// 55% QA / 15% each for the other three. If a factor is missing for someone that month (e.g.
+// no ticket data yet), its weight drops out and the rest renormalize — a missing metric never
+// silently zeros someone out, but also never accidentally cancels out a bad number the way a
+// percentile-based version could.
 const CA_OVERALL_WEIGHTS = { qa: 0.55, tickets: 0.15, availablePct: 0.15, acw: 0.15 };
-function qaOverallScore(ev, allTickets, allAvail, allQa, allAcw) {
+function qaOverallScore(ev) {
   let weightedSum = 0, weightTotal = 0;
-  const add = (key, p) => { if (p == null) return; weightedSum += p * CA_OVERALL_WEIGHTS[key]; weightTotal += CA_OVERALL_WEIGHTS[key]; };
-  if (ev.tickets != null) add("tickets", qaPercentile(allTickets, ev.tickets));
-  if (ev.availablePct != null) add("availablePct", qaPercentile(allAvail, ev.availablePct));
-  if (ev.qa != null) add("qa", qaPercentile(allQa, ev.qa));
-  if (ev.acw != null && allAcw) { const p = qaPercentile(allAcw, ev.acw); if (p != null) add("acw", 100 - p); }
+  const add = (key, score) => { if (score == null) return; weightedSum += score * CA_OVERALL_WEIGHTS[key]; weightTotal += CA_OVERALL_WEIGHTS[key]; };
+  if (ev.tickets != null) add("tickets", Math.min((ev.tickets / CA_TICKET_BENCHMARK) * 100, 100));
+  if (ev.availablePct != null) add("availablePct", Math.min(ev.availablePct, 100));
+  if (ev.qa != null) add("qa", ev.qa);
+  if (ev.acw != null) add("acw", Math.max(0, 100 - ev.acw));
   return weightTotal > 0 ? Math.round(weightedSum / weightTotal) : null;
+}
+
+// True only when all 4 factors were actually available — used to flag scores that are based on
+// a partial formula (e.g. no QA tickets reviewed yet, or tickets-exempt), so a score computed
+// from only 2 of 4 factors never looks identical to a full one.
+function qaOverallComplete(ev) {
+  return ev.tickets != null && ev.availablePct != null && ev.qa != null && ev.acw != null;
 }
 
 // Same bullet logic as the standalone tool's analyzeAgent(), just returning plain strings.
@@ -3044,28 +3051,28 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
 
     const ev = { tickets: numOrNull(raw.tickets), availablePct: numOrNull(raw.availablePct), acw: numOrNull(raw.acw), qa: numOrNull(raw.qa) };
 
-    // Combined Overall score — same formula as the manager-only CA Eval tab (percentile rank on
-    // each factor, averaged, ACW inverted since lower is better), but this PDF goes to the
-    // employee, so it deliberately shows just the tier word ("Good") and never the raw
-    // percentile or any "vs your teammates" framing — that comparison stays in CA Eval only.
-    const overall = qaOverallScore(ev, allTicketVals, allAvailVals, allQaVals, allAcwVals);
+    // Combined Overall score — individual, target-based (not ranked against teammates): each
+    // factor scored 0-100 against its own fixed benchmark, weighted 55% QA / 15% each for
+    // Tickets, Available%, ACW. Shows just the tier word ("Good"), same as before.
+    const overall = qaOverallScore(ev);
     if (overall != null) {
-      const tone = qaOverallLabel(overall, false);
+      const tone = qaOverallLabel(overall);
       const OVERALL_TONE_RGB = { strong: [0, 168, 120], good: [59, 130, 246], average: [217, 119, 6], needs: [225, 29, 72] };
       const trgb = OVERALL_TONE_RGB[tone.tone] || OVERALL_TONE_RGB.average;
-      const boxH = 20;
+      const boxH = 25;
       doc.setDrawColor(9, 26, 41); doc.setLineWidth(0.6);
       doc.roundedRect(margin, y, pw - margin * 2, boxH, 2, 2, "S");
       doc.setTextColor(9, 26, 41); doc.setFontSize(8.5); doc.setFont("helvetica", "bold");
       doc.text("OVERALL SCORE", margin + 5, y + 8);
       doc.setFontSize(17);
-      doc.text(String(overall), pw - margin - 5, y + 10, "right");
-      const barX2 = margin + 5, barW2 = pw - margin * 2 - 34, barY2 = y + 13;
+      doc.text(String(overall), pw - margin - 5, y + 9, "right");
+      const barX2 = margin + 5, barW2 = pw - margin * 2 - 10, barY2 = y + 14;
       doc.setFillColor(232, 236, 240); doc.roundedRect(barX2, barY2, barW2, 4, 1, 1, "F");
       const fillW2 = Math.min(overall / 100, 1) * barW2;
       doc.setFillColor(...trgb); if (fillW2 > 0.5) doc.roundedRect(barX2, barY2, fillW2, 4, 1, 1, "F");
       doc.setTextColor(...trgb); doc.setFontSize(7.5); doc.setFont("helvetica", "bold");
-      doc.text(tone.text, pw - margin - 5, y + 8, "right");
+      const tierLabel = qaOverallComplete(ev) ? tone.text : `${tone.text} (partial data)`;
+      doc.text(tierLabel, pw - margin - 5, y + 22, "right");
       y += boxH + 6;
     }
 
@@ -3846,10 +3853,11 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
   const avgTickets = avg(allTickets), avgAvail = avg(allAvail), avgQaVal = avg(allQa);
 
   const fullyEvaluated = evaluated.map((r) => {
-    const overall = qaOverallScore(r.ev, allTickets, allAvail, allQa, allAcw);
+    const overall = qaOverallScore(r.ev);
     const label = qaOverallLabel(overall);
+    const overallComplete = qaOverallComplete(r.ev);
     const { highlights, improvements, coaching } = analyzeCaEval(r.ev, avgQaVal);
-    return { ...r, overall, label, highlights, improvements, coaching };
+    return { ...r, overall, label, overallComplete, highlights, improvements, coaching };
   });
   const sortedEvaluated = [...fullyEvaluated].sort((a, b) => {
     // Trend-flagged people jump ahead of anyone without data or a flag — a real slide is worth
@@ -3919,7 +3927,7 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
       </div>
 
       <div className="border border-slate-200 rounded-lg bg-white divide-y divide-slate-100">
-        {sortedEvaluated.map(({ emp, empMonths, monthsInRange, ev, overall, label, highlights, improvements, coaching, qaHistory, trendFlag, monthsTracked }) => {
+        {sortedEvaluated.map(({ emp, empMonths, monthsInRange, ev, overall, label, overallComplete, highlights, improvements, coaching, qaHistory, trendFlag, monthsTracked }) => {
           const MetricTile = ({ metricKey, value, suffix }) => (
             <div className={`rounded-lg border p-1.5 text-center ${metricTierClasses(metricKey, value, emp)}`}>
               <div className="flex items-center justify-center gap-0.5">
@@ -3950,7 +3958,10 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
                 </div>
 
                 <div className="flex-1 min-w-[140px]">
-                  <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-medium whitespace-nowrap ${QA_OVERALL_TONE[label.tone]}`}>{label.text}</span>
+                  <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border font-medium whitespace-nowrap ${QA_OVERALL_TONE[label.tone]}`}>
+                    {overall != null ? `${overall} · ${label.text}` : label.text}
+                    {overall != null && !overallComplete && " (partial data)"}
+                  </span>
                   {trendFlag && (
                     <p className="text-[11px] text-amber-700 mt-1 leading-snug flex items-start gap-1">
                       <TrendingDown className="w-3 h-3 mt-0.5 shrink-0" /> {trendFlag.text}
