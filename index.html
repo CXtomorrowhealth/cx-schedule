@@ -2655,19 +2655,21 @@ function qaOverallLabel(o) {
 // Individual, target-based score — NOT ranked against teammates. Each factor is converted to
 // its own 0-100 score against its own fixed benchmark, using the same benchmarks the badges
 // already use, so this always reads as "how close to the goal," never "better/worse than
-// coworkers": Tickets/hr as % of the CA_TICKET_BENCHMARK goal (capped at 100 for exceeding it),
-// Available% used directly (it's already 0-100 and the 50% target lines up naturally), ACW%
-// inverted (100 - ACW, since lower is better), QA used directly (already 0-100). Weighted
-// 55% QA / 15% each for the other three. If a factor is missing for someone that month (e.g.
-// no ticket data yet), its weight drops out and the rest renormalize — a missing metric never
-// silently zeros someone out, but also never accidentally cancels out a bad number the way a
-// percentile-based version could.
+// coworkers": Tickets/hr AND Available% are both scored as a ratio to their own target
+// (CA_TICKET_BENCHMARK, CA_AVAIL_GOOD), capped at 100 — meeting or beating the target earns full
+// marks. (Available% can't just use the raw percentage: nobody is ever available 100% of their
+// shift, so that would make a perfect score mathematically unreachable even for someone crushing
+// the actual >50% target.) ACW% is inverted (100 - ACW, since lower is better), QA is used
+// directly (already 0-100). Weighted 55% QA / 15% each for the other three. If a factor is
+// missing for someone that month (e.g. no ticket data yet), its weight drops out and the rest
+// renormalize — a missing metric never silently zeros someone out, but also never accidentally
+// cancels out a bad number the way a percentile-based version could.
 const CA_OVERALL_WEIGHTS = { qa: 0.55, tickets: 0.15, availablePct: 0.15, acw: 0.15 };
 function qaOverallScore(ev) {
   let weightedSum = 0, weightTotal = 0;
   const add = (key, score) => { if (score == null) return; weightedSum += score * CA_OVERALL_WEIGHTS[key]; weightTotal += CA_OVERALL_WEIGHTS[key]; };
   if (ev.tickets != null) add("tickets", Math.min((ev.tickets / CA_TICKET_BENCHMARK) * 100, 100));
-  if (ev.availablePct != null) add("availablePct", Math.min(ev.availablePct, 100));
+  if (ev.availablePct != null) add("availablePct", Math.min((ev.availablePct / CA_AVAIL_GOOD) * 100, 100));
   if (ev.qa != null) add("qa", ev.qa);
   if (ev.acw != null) add("acw", Math.max(0, 100 - ev.acw));
   return weightTotal > 0 ? Math.round(weightedSum / weightTotal) : null;
