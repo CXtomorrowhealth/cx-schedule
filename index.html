@@ -38,8 +38,10 @@ const STORAGE_KEY = "cx-schedule-v1";
 // to read the code and brute-force offline could eventually get past this. What it actually
 // stops is casual guessing through the UI: the passcode itself isn't sitting in plain text for
 // a quick view-source, and the lockout below makes trial-and-error through the input painfully
-// slow. To change the passcode: run it through SHA-256 and replace the hash below.
-const MANAGER_PASSCODE_HASH = "774e1c5089db0305da0feee5bb5b5d7a3218d3892fba345068e08da6983cbc86"; // sha256("9594CX")
+// slow. To change the passcode: run it through SHA-256 and replace the hash below — and do NOT
+// leave the plaintext in a comment here like before; that undoes the whole point of hashing it.
+// Rotated after a termination — new passcode was given to the manager directly, not stored here.
+const MANAGER_PASSCODE_HASH = "b0f2d6aa0b27a9d17c59956d546dd1e5bd7c3e650bf97a1d3319a01c73d9f7a4";
 async function sha256Hex(text) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -170,8 +172,12 @@ function greeting() {
 // there's no cross-artifact storage question left: it's all one published page.
 function EmployeeView({ employees, cells, dates, meId, onSignOut, lastSynced, offline }) {
   const me = employees.find((e) => e.id === meId);
-  if (!me) {
-    // Their session pointed at an id that no longer exists on the roster (removed employee).
+  if (!me || TERMINATED_STATUSES.includes(me.status)) {
+    // Either their session pointed at an id that no longer exists on the roster (removed
+    // employee), or their record is still there for historical schedule/QA data but they're
+    // marked terminated/attrition — either way, this ends the session right here rather than
+    // relying only on the PIN being blocked, so an already-open session on a device doesn't
+    // just keep working after someone's last day.
     return (
       <div className="min-h-screen bg-white flex items-center justify-center p-4" style={{ fontFamily: "'Inter', sans-serif" }}>
         <FontImport />
@@ -304,6 +310,11 @@ const STATUS = {
 // Off labels to the Schedule status they represent, so setting one now sets both. "Flex"
 // deliberately has no mapping — it doesn't necessarily mean a full day off, so it's left as
 // a Time-Off-only entry rather than guessing at a Schedule status for it.
+// Employee statuses that mean "no longer here" — their record stays in the roster (so past
+// schedules, QA history, and PTO balances don't just vanish), but their sign-in code must stop
+// working immediately, even though it's technically still sitting on their employee record.
+const TERMINATED_STATUSES = ["Attrition", "Terminated", "Inactive"];
+
 const TIMEOFF_LABEL_TO_STATUS = {
   Approved: "PTO",
   Sick: "Sick",
@@ -4479,7 +4490,7 @@ export default function ManagerSchedule() {
 
   const tryEmployeeSignIn = async () => {
     if (!data) return;
-    const match = (data.employees || []).find((e) => e.pin && e.pin === empPinInput);
+    const match = (data.employees || []).find((e) => e.pin && e.pin === empPinInput && !TERMINATED_STATUSES.includes(e.status));
     if (match) {
       setEmpSelectedId(match.id);
       setEmpPinError(false);
