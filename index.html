@@ -1647,7 +1647,7 @@ function resolveCoverage(rule, date, employees, cells) {
   return null;
 }
 
-function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, teamColor, setEditing, removeDate, removeEmployee, timeOffDates, standingCoverage, assignCoverageForDate }) {
+function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, teamColor, setEditing, removeDate, removeEmployee, timeOffDates, standingCoverage, assignCoverageForDate, holidays }) {
   const [rowPicker, setRowPicker] = useState(null); // date string of the pill currently showing its assign dropdown
 
   // Group into real Mon-Sun calendar weeks rather than just slicing every 7 array entries —
@@ -1725,28 +1725,31 @@ function TimelineView({ employees, dates, cells, timelineDate, setTimelineDate, 
                 const weekday = new Date(d + "T00:00:00").getDay();
                 const rule = standingCoverage.find((r) => r.weekdays.includes(weekday));
                 if (!rule) return <div key={d} />;
-                const covering = resolveCoverage(rule, d, employees, cells);
+                const holiday = (holidays || []).find((h) => h.date === d);
+                const covering = holiday ? null : resolveCoverage(rule, d, employees, cells);
                 const isWknd = weekday === 0 || weekday === 6;
                 const Icon = isWknd ? Sun : Moon;
-                const state = !covering ? "gap" : covering.isDefault ? "ok" : "swapped";
+                const state = holiday ? "holiday" : !covering ? "gap" : covering.isDefault ? "ok" : "swapped";
                 const colorStyle = state === "ok"
                   ? { backgroundColor: TH.tealLight, color: TH.tealDark, borderColor: "#b7e8d8" }
                   : state === "swapped"
                   ? { backgroundColor: TH.blueLight, color: TH.blueDark, borderColor: "#c9e0ec" }
+                  : state === "holiday"
+                  ? { backgroundColor: "#f4f6f8", color: "#94a3b8", borderColor: TH.border }
                   : { backgroundColor: "#fef3ec", color: "#b45309", borderColor: "#fbd8b5" };
                 return (
                   <div key={d} className="relative">
                     <button
-                      onClick={() => setRowPicker(rowPicker === d ? null : d)}
-                      title={`${rule.label} · ${formatRange12h(rule.start, rule.end)}${covering ? ` · ${covering.name}` : " · needs someone"}`}
+                      onClick={() => !holiday && setRowPicker(rowPicker === d ? null : d)}
+                      title={holiday ? `${holiday.label} — no after-hours/weekend support run today` : `${rule.label} · ${formatRange12h(rule.start, rule.end)}${covering ? ` · ${covering.name}` : " · needs someone"}`}
                       className="w-full flex items-center justify-center gap-1 text-[10px] font-semibold px-1 py-1 rounded-md border truncate"
                       style={colorStyle}
                     >
                       <Icon className="w-2.5 h-2.5 shrink-0" />
-                      <span className="truncate">{covering ? covering.name.split(" ")[0] : "Unfilled"}</span>
+                      <span className="truncate">{holiday ? "Holiday" : covering ? covering.name.split(" ")[0] : "Unfilled"}</span>
                     </button>
-                    <div className="text-center text-[8.5px] text-slate-400 mt-0.5 font-mono">{formatRange12h(rule.start, rule.end)}</div>
-                    {rowPicker === d && (
+                    <div className="text-center text-[8.5px] text-slate-400 mt-0.5 font-mono">{holiday ? holiday.label : formatRange12h(rule.start, rule.end)}</div>
+                    {rowPicker === d && !holiday && (
                       <div className="absolute z-10 top-full mt-1 left-1/2 -translate-x-1/2 bg-white border border-slate-200 rounded-lg shadow-lg p-1 min-w-[150px]">
                         {employees.map((e) => (
                           <div
@@ -5449,11 +5452,15 @@ export default function ManagerSchedule() {
 
           {(() => {
             // Gaps: a rule's weekday with nobody at all carrying that task that day — either
-            // the default assignee is out and nobody's been manually reassigned yet.
+            // the default assignee is out and nobody's been manually reassigned yet. Holidays
+            // are excluded — we don't run after-hours/weekend support on a company holiday, so
+            // an "unfilled" slot that day isn't actually a gap, it's expected.
+            const holidayDates = new Set((holidays || []).map((h) => h.date));
             const gaps = [];
             (data.standingCoverage || []).forEach((rule) => {
               dates.forEach((date) => {
                 if (date < todayISO) return;
+                if (holidayDates.has(date)) return;
                 const weekday = new Date(date + "T00:00:00").getDay();
                 if (!rule.weekdays.includes(weekday)) return;
                 const covered = employees.some((e) => (cells[cellKey(e.id, date)]?.tasks || []).some((t) => t.name === rule.label && t.start === rule.start && t.end === rule.end));
@@ -5508,6 +5515,7 @@ export default function ManagerSchedule() {
             timeOffDates={data.timeOffDates || []}
             standingCoverage={data.standingCoverage || []}
             assignCoverageForDate={assignCoverageForDate}
+            holidays={holidays}
           />
         </>
       )}
