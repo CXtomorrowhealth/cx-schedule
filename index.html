@@ -545,6 +545,12 @@ function ensureWeekendCoverageRules(dataObj) {
     if (def && r.id === "after-hours-sat" && r.start === "10:00" && r.end === "18:30") {
       return { ...r, start: def.start, end: def.end };
     }
+    // Reevaluated against the CCA MSA — CAs are only contractually required through 5:30pm ET;
+    // the old 8pm end time was longer than that need actually requires. Trimmed to 5:30-6:30pm,
+    // a one-hour buffer matching the urgent-order 1-hour SLA clock rather than a full evening shift.
+    if (def && r.id === "after-hours" && r.start === "17:30" && r.end === "20:00") {
+      return { ...r, end: def.end };
+    }
     return r;
   });
   const changed = missing.length > 0 || corrected.some((r, i) => r !== existing[i]);
@@ -602,6 +608,35 @@ function ensureStandingCoverageTasks(dataObj) {
   (dataObj.employees || []).forEach((e) => { employeesById[e.id] = e; });
   let changed = false;
   const nextCells = { ...dataObj.cells };
+
+  // Migrate any already-materialized coverage task/block whose start/end no longer match the
+  // rule's CURRENT window (e.g. After Hours trimmed from 5:30-8pm down to 5:30-6:30pm) — rewrite
+  // them in place rather than leaving the stale entry sitting there AND adding a fresh one
+  // alongside it next pass.
+  (dataObj.dates || []).forEach((date) => {
+    rules.forEach((rule) => {
+      const tid = `sc-${rule.id}-${date}`;
+      const bid = `scblk-${rule.id}-${date}`;
+      (dataObj.employees || []).forEach((e) => {
+        const key = cellKey(e.id, date);
+        const cell = nextCells[key];
+        if (!cell) return;
+        const staleTask = (cell.tasks || []).find((t) => t.id === tid && (t.start !== rule.start || t.end !== rule.end));
+        const staleBlock = Array.isArray(cell.blocks) ? cell.blocks.find((b) => b.id === bid && (b.start !== rule.start || b.end !== rule.end)) : null;
+        if (!staleTask && !staleBlock) return;
+        changed = true;
+        let nextTasks = cell.tasks || [];
+        if (staleTask) nextTasks = nextTasks.map((t) => (t.id === tid ? { ...t, start: rule.start, end: rule.end } : t));
+        let patch = { tasks: nextTasks };
+        if (staleBlock) {
+          const nextBlocks = cell.blocks.map((b) => (b.id === bid ? { ...b, start: rule.start, end: rule.end } : b));
+          patch = { tasks: nextTasks, blocks: nextBlocks, ...deriveLegacyFieldsFromBlocks(nextBlocks) };
+        }
+        nextCells[key] = { ...cell, ...patch };
+      });
+    });
+  });
+
   (dataObj.dates || []).forEach((date) => {
     const weekday = new Date(date + "T00:00:00").getDay();
     rules.forEach((rule) => {
@@ -1032,7 +1067,7 @@ function deriveLegacyFieldsFromBlocks(blocks) {
 
 
 const DEFAULT_STANDING_COVERAGE = [
-  { id: "after-hours", label: "After Hours Coverage", start: "17:30", end: "20:00", weekdays: [1, 2, 3, 4, 5], assigneeId: "nivia-muniz" },
+  { id: "after-hours", label: "After Hours Coverage", start: "17:30", end: "18:30", weekdays: [1, 2, 3, 4, 5], assigneeId: "nivia-muniz" },
   { id: "after-hours-sat", label: "Weekend Coverage", start: "09:00", end: "17:30", weekdays: [6], assigneeId: "audrey-kaufman" },
   { id: "after-hours-sun", label: "Weekend Coverage", start: "09:00", end: "17:30", weekdays: [0], assigneeId: "shelyn-hernandez" },
 ];
