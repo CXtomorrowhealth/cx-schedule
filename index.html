@@ -477,7 +477,7 @@ function autoRequiredDates() {
   const mondayOffset = day === 0 ? -6 : 1 - day;
   const monday = new Date(today); monday.setDate(today.getDate() + mondayOffset);
   const result = [];
-  for (let w = 0; w < 2; w++) {
+  for (let w = 0; w < 3; w++) {
     for (let d = 0; d < 7; d++) {
       const dt = new Date(monday); dt.setDate(monday.getDate() + w * 7 + d);
       result.push(dt.toISOString().slice(0, 10));
@@ -4396,6 +4396,11 @@ export default function ManagerSchedule() {
   const [showCoverageSettings, setShowCoverageSettings] = useState(false);
   const [coverageGapPicker, setCoverageGapPicker] = useState(null); // `${ruleId}::${date}` currently open, if any
   const [copyToDaysOpen, setCopyToDaysOpen] = useState(false);
+  const [bulkCopyOpen, setBulkCopyOpen] = useState(false);
+  const [bulkCopySourceDate, setBulkCopySourceDate] = useState(null);
+  const [bulkCopyEmpIds, setBulkCopyEmpIds] = useState([]);
+  const [bulkCopyTargetDates, setBulkCopyTargetDates] = useState([]);
+  const [bulkCopyConfirm, setBulkCopyConfirm] = useState("");
   const [tdSuggestComment, setTdSuggestComment] = useState({}); // blockId -> comment text for the "Add to Time Off" suggestion
   const [logTimeOff, setLogTimeOff] = useState(null); // empId
   const [logPickerEmp, setLogPickerEmp] = useState("");
@@ -4996,6 +5001,28 @@ export default function ManagerSchedule() {
     persist({ ...base, cells: nextCells, updatedAt: Date.now() });
   };
 
+  // Same idea as copyCellToDates, but for several people at once — each person's OWN
+  // sourceDate cell gets copied onto every target date, so if Kaylee and Nivia have different
+  // schedules on the source day, that difference carries through, not a single shared template.
+  // One persist call for the whole batch instead of one per person, so a large multi-select
+  // copy doesn't fire dozens of separate saves.
+  const copyScheduleBulk = (empIds, sourceDate, targetDates) => {
+    const base = dataRef.current;
+    const nextCells = { ...base.cells };
+    empIds.forEach((empId) => {
+      const raw = base.cells[cellKey(empId, sourceDate)];
+      const sourceCell = raw ? normalizeCell(raw) : emptyCell();
+      targetDates.forEach((d) => {
+        nextCells[cellKey(empId, d)] = {
+          ...sourceCell,
+          tasks: (sourceCell.tasks || []).map((t) => ({ ...t })),
+          blocks: Array.isArray(sourceCell.blocks) ? sourceCell.blocks.map((b) => ({ ...b })) : sourceCell.blocks,
+        };
+      });
+    });
+    persist({ ...base, cells: nextCells, updatedAt: Date.now() });
+  };
+
   const updateEmployee = (empId, field, value) => {
     const base = dataRef.current;
     const nextEmployees = base.employees.map((e) => e.id === empId ? { ...e, [field]: value } : e);
@@ -5395,6 +5422,13 @@ export default function ManagerSchedule() {
               style={{ borderColor: TH.border, color: TH.textMid }}
             >
               <Clock3 className="w-3.5 h-3.5" /> Standing coverage
+            </button>
+            <button
+              onClick={() => setBulkCopyOpen(true)}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border transition-colors"
+              style={{ borderColor: TH.border, color: TH.textMid }}
+            >
+              <Copy className="w-3.5 h-3.5" /> Copy schedule
             </button>
             {Object.keys(data.scheduleArchive || {}).length > 0 && (
               <select
@@ -6094,6 +6128,88 @@ export default function ManagerSchedule() {
             <div className="flex gap-2">
               <button onClick={() => setAddingDate(false)} className="flex-1 text-sm px-3 py-2 rounded border border-slate-300 text-slate-700">Cancel</button>
               <button onClick={addDate} className="th-btn-primary transition-colors flex-1 text-sm px-3 py-2 rounded text-white font-medium">Add</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk copy schedule modal — pick a source date, one or more people, and one or more
+          target dates; each person's OWN cell on the source date gets copied onto every target
+          date, all in a single save. */}
+      {bulkCopyOpen && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setBulkCopyOpen(false)}>
+          <div className="bg-white border border-slate-300 rounded-lg w-full max-w-md max-h-[85vh] overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-slate-900 mb-1">Copy schedule</h3>
+            <p className="text-[11px] text-slate-400 mb-4">Copies each person's own schedule from the source date onto every date you check below.</p>
+
+            <label className="block text-[11px] font-medium text-slate-500 mb-1">Copy from</label>
+            <select
+              value={bulkCopySourceDate || ""}
+              onChange={(e) => setBulkCopySourceDate(e.target.value)}
+              className="w-full bg-white border border-slate-300 rounded px-2 py-1.5 text-sm text-slate-900 mb-4"
+            >
+              <option value="" disabled>Select a date…</option>
+              {dates.map((d) => <option key={d} value={d}>{fmtDate(d)}</option>)}
+            </select>
+
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-[11px] font-medium text-slate-500">People ({bulkCopyEmpIds.length} selected)</label>
+              <div className="flex gap-2">
+                <button onClick={() => setBulkCopyEmpIds(employees.map((e) => e.id))} className="text-[10px] font-medium" style={{ color: TH.tealDark }}>All</button>
+                <button onClick={() => setBulkCopyEmpIds([])} className="text-[10px] text-slate-400 font-medium">Clear</button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-1 mb-4 max-h-32 overflow-auto pr-1 border border-slate-100 rounded p-2">
+              {employees.map((e) => (
+                <label key={e.id} className="flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={bulkCopyEmpIds.includes(e.id)}
+                    onChange={() => setBulkCopyEmpIds((prev) => prev.includes(e.id) ? prev.filter((x) => x !== e.id) : [...prev, e.id])}
+                    className="accent-teal-600"
+                  />
+                  {e.name}
+                </label>
+              ))}
+            </div>
+
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-[11px] font-medium text-slate-500">Copy to ({bulkCopyTargetDates.length} selected)</label>
+              <div className="flex gap-2">
+                <button onClick={() => setBulkCopyTargetDates(dates.filter((d) => d !== bulkCopySourceDate))} className="text-[10px] font-medium" style={{ color: TH.tealDark }}>All</button>
+                <button onClick={() => setBulkCopyTargetDates([])} className="text-[10px] text-slate-400 font-medium">Clear</button>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-1 mb-4 max-h-32 overflow-auto pr-1 border border-slate-100 rounded p-2">
+              {dates.filter((d) => d !== bulkCopySourceDate).map((d) => (
+                <label key={d} className="flex items-center gap-1 text-[10px] text-slate-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={bulkCopyTargetDates.includes(d)}
+                    onChange={() => setBulkCopyTargetDates((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d])}
+                    className="accent-teal-600"
+                  />
+                  {fmtDate(d)}
+                </label>
+              ))}
+            </div>
+
+            {bulkCopyConfirm && <p className="text-[11px] text-teal-700 mb-3">{bulkCopyConfirm}</p>}
+
+            <div className="flex gap-2">
+              <button onClick={() => { setBulkCopyOpen(false); setBulkCopyConfirm(""); }} className="flex-1 text-sm px-3 py-2 rounded border border-slate-300 text-slate-700">Cancel</button>
+              <button
+                disabled={!bulkCopySourceDate || bulkCopyEmpIds.length === 0 || bulkCopyTargetDates.length === 0}
+                onClick={() => {
+                  const nPeople = bulkCopyEmpIds.length, nDays = bulkCopyTargetDates.length;
+                  copyScheduleBulk(bulkCopyEmpIds, bulkCopySourceDate, bulkCopyTargetDates);
+                  setBulkCopyConfirm(`Copied ${nPeople} ${nPeople === 1 ? "person" : "people"}'s schedule to ${nDays} ${nDays === 1 ? "day" : "days"}.`);
+                  setBulkCopyEmpIds([]); setBulkCopyTargetDates([]);
+                }}
+                className="th-btn-primary transition-colors flex-1 text-sm px-3 py-2 rounded text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Copy
+              </button>
             </div>
           </div>
         </div>
