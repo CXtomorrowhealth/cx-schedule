@@ -387,8 +387,13 @@ function computeAttendance(emp, cells, startISO, endISO) {
       category = "notScheduled";
     } else {
       const cell = cells[cellKey(emp.id, iso)];
-      const fullDayOff = cell && cell.status && cell.statusScope !== "partial" && breakdown.hasOwnProperty(cell.status);
-      category = fullDayOff ? cell.status : "worked";
+      // Legacy data may still carry the old "PTO" status literal instead of "OOO" — coerce it
+      // the same way getCellBlocks already does for rendering, or these days silently count as
+      // worked instead of off.
+      const rawStatus = cell && cell.status;
+      const normalizedStatus = rawStatus === "PTO" ? "OOO" : rawStatus;
+      const fullDayOff = cell && normalizedStatus && cell.statusScope !== "partial" && breakdown.hasOwnProperty(normalizedStatus);
+      category = fullDayOff ? normalizedStatus : "worked";
     }
     breakdown[category] = (breakdown[category] || 0) + 1;
     days.push({ date: iso, category });
