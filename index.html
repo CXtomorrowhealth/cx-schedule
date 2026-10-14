@@ -17,6 +17,7 @@
 }
 </script>
 <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   @keyframes th-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 </style>
@@ -1222,6 +1223,7 @@ const TABS = [
   { id: "timeoff", label: "Time Off", icon: Clock3 },
   { id: "ptoeval", label: "Quarterly PTO Eval", icon: Microscope },
   { id: "scorecard", label: "CA Scorecard", icon: FileSpreadsheet },
+  { id: "bonus", label: "Bonus & Attendance", icon: Palmtree },
   { id: "caeval", label: "CA Eval", icon: UserCheck },
   { id: "holidays", label: "Holiday Coverage", icon: Gift },
 ];
@@ -3032,14 +3034,25 @@ function scorecardParsePivotProductivity(rows) {
   // named columns instead of a fixed Name/Status/Minutes order, durations in seconds, status
   // codes like "Additional_After_Call_Work" (underscored) instead of "After Call Work", and no
   // "Total" row at all — total has to be every row's duration summed per person instead.
-  if (keys.includes("User: Full Name") && keys.includes("Service Presence Status: Developer Name") && keys.includes("Status Duration")) {
+  // Real exports of this shape vary a little more: sort-arrow suffixes on header names ("User:
+  // Full Name  ↑"), "Sum of Status Duration" instead of "Status Duration", and the name cell
+  // only populated on each person's FIRST row (blank/merged on the rest) — normalize the header
+  // lookup and forward-fill the name to handle both.
+  const normKey = (k) => k.replace(/\s*[↑↓]\s*$/, "").replace(/^Sum of\s+/i, "").trim();
+  const keyLookup = {};
+  keys.forEach((k) => { keyLookup[normKey(k)] = k; });
+  if (keyLookup["User: Full Name"] && keyLookup["Service Presence Status: Developer Name"] && keyLookup["Status Duration"]) {
+    const nameCol = keyLookup["User: Full Name"], statusCol = keyLookup["Service Presence Status: Developer Name"], durCol = keyLookup["Status Duration"];
     const available = {}, acw = {}, total = {};
+    let lastName = "";
     for (const row of rows) {
-      const nameVal = (row["User: Full Name"] || "").trim();
-      const durVal = parseFloat(row["Status Duration"]);
+      const rawName = (row[nameCol] || "").trim();
+      if (rawName) lastName = rawName;
+      const nameVal = lastName;
+      const durVal = parseFloat(row[durCol]);
       if (!nameVal || isNaN(durVal)) continue;
       const name = scorecardNormName(nameVal);
-      const statusVal = (row["Service Presence Status: Developer Name"] || "").trim().toLowerCase().replace(/_/g, " ");
+      const statusVal = (row[statusCol] || "").trim().toLowerCase().replace(/_/g, " ");
       total[name] = (total[name] || 0) + durVal;
       if (statusVal === "available") available[name] = (available[name] || 0) + durVal;
       if (statusVal.includes("after call")) acw[name] = (acw[name] || 0) + durVal;
@@ -3050,6 +3063,7 @@ function scorecardParsePivotProductivity(rows) {
       result[name] = {
         availability: tot > 0 ? parseFloat((((available[name] || 0) / tot) * 100).toFixed(1)) : null,
         acw: tot > 0 ? parseFloat((((acw[name] || 0) / tot) * 100).toFixed(1)) : null,
+        availableHours: (available[name] || 0) / 3600,
       };
     }
     return Object.keys(result).length > 0 ? result : null;
@@ -3569,31 +3583,13 @@ function matchScorecardCSVs({ ticketsRows, productivityRows, qaRows, histRows },
   const results = {};
   const unmatched = [];
 
-  if (ticketsRows && ticketsRows.length) {
-    const nc = scorecardNameCol(ticketsRows);
-    const headers = Object.keys(ticketsRows[0]);
-    const vc = headers[headers.length - 1];
-    if (nc && vc) {
-      ticketsRows.forEach((row) => {
-        const name = row[nc]; if (!name) return;
-        if (/^ticket\s*\d+$/i.test(name.trim())) return;
-        if (name.toLowerCase().includes("manager")) return;
-        const key = scorecardFuzzyMatch(name, rosterKeys);
-        const val = parseFloat(row[vc]);
-        if (key && keyToEmp[key] && !isNaN(val)) {
-          const empId = keyToEmp[key].id;
-          results[empId] = { ...(results[empId] || {}), tickets: val };
-        } else if (!key) {
-          unmatched.push(name.trim());
-        }
-      });
-    }
-  }
-
+  // Computed first so its availableHours figures exist before the raw Ticket Pull branch below
+  // needs to divide by them.
+  let productivityPivot = null;
   if (productivityRows && productivityRows.length) {
-    const pivot = scorecardParsePivotProductivity(productivityRows);
-    if (pivot) {
-      Object.entries(pivot).forEach(([pivotKey, val]) => {
+    productivityPivot = scorecardParsePivotProductivity(productivityRows);
+    if (productivityPivot) {
+      Object.entries(productivityPivot).forEach(([pivotKey, val]) => {
         const key = scorecardFuzzyMatch(pivotKey, rosterKeys);
         if (key && keyToEmp[key]) {
           const empId = keyToEmp[key].id;
@@ -3602,6 +3598,55 @@ function matchScorecardCSVs({ ticketsRows, productivityRows, qaRows, histRows },
           unmatched.push(pivotKey);
         }
       });
+    }
+  }
+
+  if (ticketsRows && ticketsRows.length) {
+    const headers = Object.keys(ticketsRows[0]);
+    // Raw "Ticket Pull" export: one row per closed ticket (Ticket Owner, Date/Time Opened, ...)
+    // rather than one pre-computed "tickets/hr" row per person — count rows per owner, then
+    // divide by that same person's available hours (from the Productivity upload above) to get
+    // a real tickets/hour instead of requiring the rate to already be calculated beforehand.
+    if (headers.includes("Ticket Owner")) {
+      const counts = {};
+      ticketsRows.forEach((row) => {
+        const name = (row["Ticket Owner"] || "").trim();
+        if (!name || name.toLowerCase() === "total") return;
+        counts[name] = (counts[name] || 0) + 1;
+      });
+      Object.entries(counts).forEach(([name, count]) => {
+        const key = scorecardFuzzyMatch(name, rosterKeys);
+        if (!key || !keyToEmp[key]) { unmatched.push(name); return; }
+        const empId = keyToEmp[key].id;
+        const pivotKey = productivityPivot && Object.keys(productivityPivot).find((pk) => scorecardFuzzyMatch(pk, rosterKeys) === key);
+        const hours = pivotKey ? productivityPivot[pivotKey].availableHours : null;
+        if (hours && hours > 0) {
+          results[empId] = { ...(results[empId] || {}), tickets: parseFloat((count / hours).toFixed(2)), ticketCount: count, availableHoursForTickets: parseFloat(hours.toFixed(1)) };
+        } else {
+          // Counted the tickets but have no matching available-hours upload yet to divide by —
+          // keep the raw count visible rather than silently dropping it or guessing a rate.
+          results[empId] = { ...(results[empId] || {}), ticketCount: count };
+        }
+      });
+    } else {
+      // Older format: name + a pre-computed tickets/hr value directly.
+      const nc = scorecardNameCol(ticketsRows);
+      const vc = headers[headers.length - 1];
+      if (nc && vc) {
+        ticketsRows.forEach((row) => {
+          const name = row[nc]; if (!name) return;
+          if (/^ticket\s*\d+$/i.test(name.trim())) return;
+          if (name.toLowerCase().includes("manager")) return;
+          const key = scorecardFuzzyMatch(name, rosterKeys);
+          const val = parseFloat(row[vc]);
+          if (key && keyToEmp[key] && !isNaN(val)) {
+            const empId = keyToEmp[key].id;
+            results[empId] = { ...(results[empId] || {}), tickets: val };
+          } else if (!key) {
+            unmatched.push(name.trim());
+          }
+        });
+      }
     }
   }
 
@@ -3769,7 +3814,7 @@ function PtoEvalTab({ employees, timeOff, timeOffDates, notes, updateNote, updat
   );
 }
 
-function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells, timeOffDates, scheduleArchive }) {
+function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
   const [selectedMonth, setSelectedMonth] = useState(currentPeriodKey());
   const [customPeriodOpen, setCustomPeriodOpen] = useState(false);
   const [csvFiles, setCsvFiles] = useState({ tickets: null, productivity: null, qa: null, hist: null });
@@ -3783,23 +3828,44 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells, timeOffD
   // and achieved rate, scored against their own ticketRateTarget (10/hr Kaylee & Shelyn, 13/hr
   // everyone else) and that period's saved QA score. Not persisted — this is a quick weekly
   // gut-check, not a tracked record.
-  const [bonusInputs, setBonusInputs] = useState({}); // { [empId]: { closed: "", rate: "" } }
-  const [bonusWeekStart, setBonusWeekStart] = useState(""); // shared week-start date used to prorate the baseline by real attendance
-  const [attReportStart, setAttReportStart] = useState("");
-  const [attReportEnd, setAttReportEnd] = useState("");
-  const [attReportOpen, setAttReportOpen] = useState(false);
+
+
+  // Real exported reports (Ticket Pull, Time in Status, etc.) are genuine binary .xlsx files,
+  // not plain-text CSVs, and bury the real header row under several lines of report metadata
+  // ("CA Ticket Pull", "As of...", "Filtered By", the date range, ...) rather than starting at
+  // row 1. This scans for the first row that plausibly looks like a header (several non-empty
+  // cells) and treats everything after it as data, converting to the same { [header]: value }
+  // row-object shape the rest of the CSV pipeline already expects.
+  const parseScorecardXLSX = (arrayBuffer) => {
+    const wb = XLSX.read(arrayBuffer, { type: "array" });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: false });
+    let headerIdx = grid.findIndex((row) => row.filter((c) => String(c).trim() !== "").length >= 3);
+    if (headerIdx === -1) return [];
+    const headers = grid[headerIdx].map((h) => String(h).trim());
+    const rows = [];
+    for (let i = headerIdx + 1; i < grid.length; i++) {
+      const raw = grid[i];
+      if (raw.every((c) => String(c).trim() === "")) continue;
+      const obj = {};
+      headers.forEach((h, j) => { if (h) obj[h] = raw[j] != null ? String(raw[j]).trim() : ""; });
+      rows.push(obj);
+    }
+    return rows;
+  };
 
   const handleCsvFile = (type, file) => {
     if (!file) return;
     setCsvError(null);
+    const isExcel = /\.xlsx?$/i.test(file.name);
     const reader = new FileReader();
     reader.onload = (e) => {
-      const rows = parseScorecardCSV(e.target.result);
-      if (!rows.length) { setCsvError(`Couldn't read rows out of that ${type} CSV — check it has a header row plus data.`); return; }
+      const rows = isExcel ? parseScorecardXLSX(e.target.result) : parseScorecardCSV(e.target.result);
+      if (!rows.length) { setCsvError(`Couldn't read rows out of that ${type} file — check it has a header row plus data.`); return; }
       setCsvRows((prev) => ({ ...prev, [type]: rows }));
       setCsvFiles((prev) => ({ ...prev, [type]: file.name }));
     };
-    reader.readAsText(file);
+    if (isExcel) reader.readAsArrayBuffer(file); else reader.readAsText(file);
   };
 
   const clearCsvs = () => {
@@ -3879,7 +3945,7 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells, timeOffD
 
   const UploadCard = ({ type, label, hint }) => (
     <label className={`flex-1 min-w-[150px] border-2 rounded-lg px-3 py-4 text-center cursor-pointer transition-colors ${csvFiles[type] ? "border-teal-500 bg-teal-50" : "border-dashed border-slate-300 hover:border-teal-400"}`}>
-      <input type="file" accept=".csv" className="hidden" onChange={(e) => { handleCsvFile(type, e.target.files[0]); e.target.value = ""; }} />
+      <input type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={(e) => { handleCsvFile(type, e.target.files[0]); e.target.value = ""; }} />
       <div className="text-xs font-semibold text-slate-700">{label}</div>
       <div className={`text-[10px] mt-1 ${csvFiles[type] ? "text-teal-700 font-medium" : "text-slate-400"}`}>
         {csvFiles[type] || hint}
@@ -3930,128 +3996,6 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells, timeOffD
         );
       })()}
 
-      <div className="border rounded-lg p-4 mb-6" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
-        <div className="flex items-center justify-between">
-          <h2 className="text-xs font-mono text-slate-500 uppercase tracking-wide mb-1">Time Off &amp; Days Worked Report</h2>
-          <button onClick={() => setAttReportOpen((v) => !v)} className="text-[11px] text-teal-700 underline">{attReportOpen ? "Hide" : "Show"}</button>
-        </div>
-        {attReportOpen && (() => {
-          const canRun = attReportStart && attReportEnd && attReportStart <= attReportEnd;
-          return (
-            <div className="mt-2">
-              <div className="flex items-center gap-2 mb-3 text-xs text-slate-600">
-                <span>From</span>
-                <input type="date" value={attReportStart} onChange={(e) => setAttReportStart(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
-                <span>to</span>
-                <input type="date" value={attReportEnd} onChange={(e) => setAttReportEnd(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
-              </div>
-              {canRun ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-[11px]">
-                    <thead>
-                      <tr className="text-slate-400 text-left">
-                        <th className="pb-1.5 pr-3">Person</th>
-                        <th className="pb-1.5 pr-3">Scheduled</th>
-                        <th className="pb-1.5 pr-3">Worked</th>
-                        <th className="pb-1.5 pr-3">OOO</th>
-                        <th className="pb-1.5 pr-3">Sick</th>
-                        <th className="pb-1.5 pr-3">Holiday</th>
-                        <th className="pb-1.5 pr-3">Floating Hol.</th>
-                        <th className="pb-1.5 pr-3">LOA</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {employees.map((emp) => {
-                        const att = computeAttendance(emp, cells, attReportStart, attReportEnd, timeOffDates, scheduleArchive);
-                        const fmt1 = (n) => (n || 0).toFixed(1);
-                        return (
-                          <tr key={emp.id} className="border-t" style={{ borderColor: TH.border }}>
-                            <td className="py-1.5 pr-3 font-medium text-slate-700">{emp.name}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.scheduledDays)}</td>
-                            <td className="py-1.5 pr-3 text-teal-700 font-semibold">{fmt1(att.workedDays)}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.OOO)}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.Sick)}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.Holiday)}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.FloatingHoliday)}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.LOA)}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="text-[11px] text-slate-400">Pick a start and end date to run the report.</p>
-              )}
-            </div>
-          );
-        })()}
-      </div>
-
-      <div className="border rounded-lg p-4 mb-6" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
-        <h2 className="text-xs font-mono text-slate-500 uppercase tracking-wide mb-1">Weekly Backlog Bonus Check</h2>
-        <p className="text-[11px] text-slate-400 mb-3">
-          Per person, using their own rate target (10/hr for Kaylee &amp; Shelyn, 13/hr everyone else) and this period's saved QA score.
-          Enter this week's closed-ticket count and achieved pace to see which tier (if any) they hit. Not saved — a quick weekly check, not a tracked record.
-        </p>
-        <div className="flex items-center gap-2 mb-3 text-xs text-slate-600">
-          <span>Week starting (Mon)</span>
-          <input type="date" value={bonusWeekStart} onChange={(e) => setBonusWeekStart(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
-          <span className="text-slate-400">Baseline prorates to real days worked that week instead of assuming a full 5-day week — e.g. 3 days worked = 3/5 of the normal target, not the full week.</span>
-        </div>
-        <div className="space-y-1.5">
-          {employees.map((emp) => {
-            const rateTarget = emp.ticketRateTarget;
-            if (rateTarget == null) return null;
-            let weeklyBaseline = rateTarget * 7 * 5; // fallback: 7 productive hrs/day × 5 workdays
-            let daysWorkedThisWeek = null;
-            if (bonusWeekStart) {
-              const weekEnd = new Date(bonusWeekStart + "T00:00:00");
-              weekEnd.setDate(weekEnd.getDate() + 6);
-              const att = computeAttendance(emp, cells, bonusWeekStart, weekEnd.toISOString().slice(0, 10), timeOffDates, scheduleArchive);
-              daysWorkedThisWeek = att.workedDays;
-              weeklyBaseline = rateTarget * 7 * att.workedDays;
-            }
-            const input = bonusInputs[emp.id] || { closed: "", rate: "" };
-            const closedNum = input.closed === "" ? null : parseFloat(input.closed);
-            const rateNum = input.rate === "" ? null : parseFloat(input.rate);
-            const qaRaw = qaEvals[emp.id]?.[selectedMonth]?.qa;
-            const qaVal = (qaRaw === "" || qaRaw == null) ? null : parseFloat(qaRaw);
-            const extra = closedNum != null ? closedNum - weeklyBaseline : null;
-            const qaPass = qaVal != null && qaVal >= 90;
-            const ratePass = rateNum != null && rateNum >= rateTarget;
-            let tier = null, tierColor = "text-slate-400";
-            if (extra != null) {
-              if (!qaPass || !ratePass) { tier = "No bonus — gate not met"; tierColor = "text-rose-600"; }
-              else if (extra >= 150) { tier = "$150 gift card"; tierColor = "text-teal-700 font-semibold"; }
-              else if (extra >= 100) { tier = "$100 gift card"; tierColor = "text-teal-700 font-semibold"; }
-              else if (extra >= 50) { tier = "$50 gift card"; tierColor = "text-teal-700 font-semibold"; }
-              else { tier = "No bonus — under +50 extra"; tierColor = "text-slate-500"; }
-            }
-            return (
-              <div key={emp.id} className="flex items-center gap-2.5 text-xs bg-white border rounded px-2.5 py-1.5" style={{ borderColor: TH.border }}>
-                <span className="font-medium text-slate-700 w-28 shrink-0 truncate">{emp.name}</span>
-                <span className="text-[10px] text-slate-400 font-mono w-24 shrink-0">
-                  {rateTarget}/hr · {Math.round(weeklyBaseline)}/wk{daysWorkedThisWeek != null ? ` (${daysWorkedThisWeek.toFixed(1)}d)` : ""}
-                </span>
-                <input type="number" placeholder="Closed this wk" value={input.closed}
-                  onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, closed: e.target.value } }))}
-                  className="w-24 border rounded px-1.5 py-1 text-xs" style={{ borderColor: TH.border }} />
-                <input type="number" placeholder="Rate achieved" value={input.rate}
-                  onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, rate: e.target.value } }))}
-                  className="w-24 border rounded px-1.5 py-1 text-xs" style={{ borderColor: TH.border }} />
-                <span className="text-[10px] text-slate-400 font-mono w-24 shrink-0">
-                  QA: {qaVal != null ? `${qaVal.toFixed(1)}%` : "no data"}
-                </span>
-                <span className={`text-[11px] flex-1 text-right ${tierColor}`}>
-                  {extra != null ? `+${extra} extra — ${tier}` : "—"}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
       <div
         className="border rounded-lg p-4 mb-6"
         style={{
@@ -4066,8 +4010,8 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells, timeOffD
           )}
         </div>
         <div className="flex flex-wrap gap-2 mb-3">
-          <UploadCard type="tickets" label="Tickets per hour" hint="CSV — name + tickets/avail hr" />
-          <UploadCard type="productivity" label="Productivity" hint="CSV — Available/ACW pivot" />
+          <UploadCard type="tickets" label="Tickets per hour" hint="CSV/XLSX — rate, or a raw Ticket Pull (counted + divided by Available hrs)" />
+          <UploadCard type="productivity" label="Productivity" hint="CSV/XLSX — Available/ACW pivot, or a Time in Status export" />
           <UploadCard type="qa" label="QA scores" hint="CSV — 3-ticket pivot" />
           <UploadCard type="hist" label="Historical metrics" hint="CSV — email + call stats" />
         </div>
@@ -4153,6 +4097,158 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells, timeOffD
         </button>
         {acceptedThisMonth === 0 && <p className="text-[11px] text-slate-400 mt-1.5">Accept at least one entry for this month first.</p>}
         {pdfError && <p className="text-xs text-rose-600 mt-1.5">{pdfError}</p>}
+      </div>
+    </div>
+  );
+}
+
+function BonusAttendanceTab({ employees, cells, timeOffDates, scheduleArchive, qaEvals }) {
+  const [qaPeriod, setQaPeriod] = useState(currentPeriodKey());
+  const [bonusInputs, setBonusInputs] = useState({});
+  const [bonusWeekStart, setBonusWeekStart] = useState("");
+  const [attReportStart, setAttReportStart] = useState("");
+  const [attReportEnd, setAttReportEnd] = useState("");
+  const [attReportOpen, setAttReportOpen] = useState(true);
+
+  const [qaStart, qaEnd] = isPeriodKey(qaPeriod) ? qaPeriod.split("_") : ["", ""];
+
+  return (
+    <div className="p-4 sm:p-6 max-w-4xl mx-auto">
+      <div className="mb-5">
+        <h1 className="text-lg font-semibold text-slate-900">Bonus &amp; Attendance</h1>
+        <p className="text-xs text-slate-500 mt-1">Attendance pulled straight from the Schedule, plus the weekly backlog bonus check — separate from CA Scorecard's QA review workflow.</p>
+      </div>
+
+      <div className="flex items-center gap-2 mb-6 text-xs text-slate-600">
+        <span>QA score read from period:</span>
+        <input type="date" value={qaStart} onChange={(e) => setQaPeriod(periodKeyFromDates(e.target.value, qaEnd || e.target.value))}
+          className="bg-white border border-slate-300 rounded px-2 py-1 text-xs" />
+        <span>to</span>
+        <input type="date" value={qaEnd} onChange={(e) => setQaPeriod(periodKeyFromDates(qaStart || e.target.value, e.target.value))}
+          className="bg-white border border-slate-300 rounded px-2 py-1 text-xs" />
+        <span className="text-slate-400">Should match whatever period is currently accepted on the CA Scorecard tab.</span>
+      </div>
+
+      <div className="border rounded-lg p-4 mb-6" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-mono text-slate-500 uppercase tracking-wide mb-1">Time Off &amp; Days Worked Report</h2>
+          <button onClick={() => setAttReportOpen((v) => !v)} className="text-[11px] text-teal-700 underline">{attReportOpen ? "Hide" : "Show"}</button>
+        </div>
+        {attReportOpen && (() => {
+          const canRun = attReportStart && attReportEnd && attReportStart <= attReportEnd;
+          return (
+            <div className="mt-2">
+              <div className="flex items-center gap-2 mb-3 text-xs text-slate-600">
+                <span>From</span>
+                <input type="date" value={attReportStart} onChange={(e) => setAttReportStart(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
+                <span>to</span>
+                <input type="date" value={attReportEnd} onChange={(e) => setAttReportEnd(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
+              </div>
+              {canRun ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="text-slate-400 text-left">
+                        <th className="pb-1.5 pr-3">Person</th>
+                        <th className="pb-1.5 pr-3">Scheduled</th>
+                        <th className="pb-1.5 pr-3">Worked</th>
+                        <th className="pb-1.5 pr-3">OOO</th>
+                        <th className="pb-1.5 pr-3">Sick</th>
+                        <th className="pb-1.5 pr-3">Holiday</th>
+                        <th className="pb-1.5 pr-3">Floating Hol.</th>
+                        <th className="pb-1.5 pr-3">LOA</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {employees.map((emp) => {
+                        const att = computeAttendance(emp, cells, attReportStart, attReportEnd, timeOffDates, scheduleArchive);
+                        const fmt1 = (n) => (n || 0).toFixed(1);
+                        return (
+                          <tr key={emp.id} className="border-t" style={{ borderColor: TH.border }}>
+                            <td className="py-1.5 pr-3 font-medium text-slate-700">{emp.name}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.scheduledDays)}</td>
+                            <td className="py-1.5 pr-3 text-teal-700 font-semibold">{fmt1(att.workedDays)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.OOO)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.Sick)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.Holiday)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.FloatingHoliday)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.LOA)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-400">Pick a start and end date to run the report.</p>
+              )}
+            </div>
+          );
+        })()}
+      </div>
+
+      <div className="border rounded-lg p-4 mb-6" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
+        <h2 className="text-xs font-mono text-slate-500 uppercase tracking-wide mb-1">Weekly Backlog Bonus Check</h2>
+        <p className="text-[11px] text-slate-400 mb-3">
+          Per person, using their own rate target (10/hr for Kaylee &amp; Shelyn, 13/hr everyone else) and the QA period selected above.
+          Enter this week's closed-ticket count and achieved pace to see which tier (if any) they hit. Not saved — a quick weekly check, not a tracked record.
+        </p>
+        <div className="flex items-center gap-2 mb-3 text-xs text-slate-600">
+          <span>Week starting (Mon)</span>
+          <input type="date" value={bonusWeekStart} onChange={(e) => setBonusWeekStart(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
+          <span className="text-slate-400">Baseline prorates to real days worked that week instead of assuming a full 5-day week — e.g. 3 days worked = 3/5 of the normal target, not the full week.</span>
+        </div>
+        <div className="space-y-1.5">
+          {employees.map((emp) => {
+            const rateTarget = emp.ticketRateTarget;
+            if (rateTarget == null) return null;
+            let weeklyBaseline = rateTarget * 7 * 5; // fallback: 7 productive hrs/day × 5 workdays
+            let daysWorkedThisWeek = null;
+            if (bonusWeekStart) {
+              const weekEnd = new Date(bonusWeekStart + "T00:00:00");
+              weekEnd.setDate(weekEnd.getDate() + 6);
+              const att = computeAttendance(emp, cells, bonusWeekStart, weekEnd.toISOString().slice(0, 10), timeOffDates, scheduleArchive);
+              daysWorkedThisWeek = att.workedDays;
+              weeklyBaseline = rateTarget * 7 * att.workedDays;
+            }
+            const input = bonusInputs[emp.id] || { closed: "", rate: "" };
+            const closedNum = input.closed === "" ? null : parseFloat(input.closed);
+            const rateNum = input.rate === "" ? null : parseFloat(input.rate);
+            const qaRaw = qaEvals[emp.id]?.[qaPeriod]?.qa;
+            const qaVal = (qaRaw === "" || qaRaw == null) ? null : parseFloat(qaRaw);
+            const extra = closedNum != null ? closedNum - weeklyBaseline : null;
+            const qaPass = qaVal != null && qaVal >= 90;
+            const ratePass = rateNum != null && rateNum >= rateTarget;
+            let tier = null, tierColor = "text-slate-400";
+            if (extra != null) {
+              if (!qaPass || !ratePass) { tier = "No bonus — gate not met"; tierColor = "text-rose-600"; }
+              else if (extra >= 150) { tier = "$150 gift card"; tierColor = "text-teal-700 font-semibold"; }
+              else if (extra >= 100) { tier = "$100 gift card"; tierColor = "text-teal-700 font-semibold"; }
+              else if (extra >= 50) { tier = "$50 gift card"; tierColor = "text-teal-700 font-semibold"; }
+              else { tier = "No bonus — under +50 extra"; tierColor = "text-slate-500"; }
+            }
+            return (
+              <div key={emp.id} className="flex items-center gap-2.5 text-xs bg-white border rounded px-2.5 py-1.5" style={{ borderColor: TH.border }}>
+                <span className="font-medium text-slate-700 w-28 shrink-0 truncate">{emp.name}</span>
+                <span className="text-[10px] text-slate-400 font-mono w-24 shrink-0">
+                  {rateTarget}/hr · {Math.round(weeklyBaseline)}/wk{daysWorkedThisWeek != null ? ` (${daysWorkedThisWeek.toFixed(1)}d)` : ""}
+                </span>
+                <input type="number" placeholder="Closed this wk" value={input.closed}
+                  onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, closed: e.target.value } }))}
+                  className="w-24 border rounded px-1.5 py-1 text-xs" style={{ borderColor: TH.border }} />
+                <input type="number" placeholder="Rate achieved" value={input.rate}
+                  onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, rate: e.target.value } }))}
+                  className="w-24 border rounded px-1.5 py-1 text-xs" style={{ borderColor: TH.border }} />
+                <span className="text-[10px] text-slate-400 font-mono w-24 shrink-0">
+                  QA: {qaVal != null ? `${qaVal.toFixed(1)}%` : "no data"}
+                </span>
+                <span className={`text-[11px] flex-1 text-right ${tierColor}`}>
+                  {extra != null ? `+${extra} extra — ${tier}` : "—"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -6145,9 +6241,16 @@ export default function ManagerSchedule() {
           employees={employees}
           qaEvals={data.qaEvals || {}}
           updateQaEvalBatch={updateQaEvalBatch}
+        />
+      )}
+
+      {tab === "bonus" && (
+        <BonusAttendanceTab
+          employees={employees}
           cells={cells}
           timeOffDates={data.timeOffDates || []}
           scheduleArchive={data.scheduleArchive || {}}
+          qaEvals={data.qaEvals || {}}
         />
       )}
 
