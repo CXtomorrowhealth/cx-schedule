@@ -373,7 +373,7 @@ function isTrulyOffDay(dateStr, employees) {
 // a full allday status takes the day out of the "worked" count. Backs both the new Time Off &
 // Days Worked report and the bonus calculator's weekly proration, so both read the exact same
 // real schedule data instead of guessing or assuming a flat 5-day week.
-function computeAttendance(emp, cells, startISO, endISO) {
+function computeAttendance(emp, cells, startISO, endISO, timeOffDates, scheduleArchive) {
   const breakdown = { worked: 0, OOO: 0, Sick: 0, Holiday: 0, FloatingHoliday: 0, LOA: 0, notScheduled: 0 };
   const days = [];
   let d = new Date(startISO + "T00:00:00");
@@ -386,14 +386,27 @@ function computeAttendance(emp, cells, startISO, endISO) {
     if (!isScheduledDay) {
       category = "notScheduled";
     } else {
-      const cell = cells[cellKey(emp.id, iso)];
+      // Dates older than the current week get moved out of the live schedule into the archive
+      // by the weekly cleanup — check there too, or every archived date silently defaults to
+      // "worked" since its cell is simply missing from the live `cells` object.
+      const cell = cells[cellKey(emp.id, iso)] || (scheduleArchive && scheduleArchive[iso] && scheduleArchive[iso][emp.id]);
       // Legacy data may still carry the old "PTO" status literal instead of "OOO" — coerce it
       // the same way getCellBlocks already does for rendering, or these days silently count as
       // worked instead of off.
       const rawStatus = cell && cell.status;
       const normalizedStatus = rawStatus === "PTO" ? "OOO" : rawStatus;
-      const fullDayOff = cell && normalizedStatus && cell.statusScope !== "partial" && breakdown.hasOwnProperty(normalizedStatus);
-      category = fullDayOff ? normalizedStatus : "worked";
+      let dayCategory = (cell && normalizedStatus && cell.statusScope !== "partial" && breakdown.hasOwnProperty(normalizedStatus)) ? normalizedStatus : null;
+      // Fallback: if the schedule cell itself never got the status written (Time Off tab entry
+      // logged without syncing back to the cell), check the Time Off tab's own record for that
+      // date instead of missing it entirely.
+      if (!dayCategory && timeOffDates && timeOffDates.length) {
+        const entry = timeOffDates.find((td) => td.empId === emp.id && td.date === iso);
+        if (entry) {
+          const mapped = TIMEOFF_LABEL_TO_STATUS_MAP[entry.label];
+          if (mapped && breakdown.hasOwnProperty(mapped)) dayCategory = mapped;
+        }
+      }
+      category = dayCategory || "worked";
     }
     breakdown[category] = (breakdown[category] || 0) + 1;
     days.push({ date: iso, category });
@@ -1041,6 +1054,13 @@ function hoursBetween(start, end) {
 // usual shift, the day-fraction gets folded into the label (matching how it's written elsewhere,
 // e.g. "Sick 0.25 day") instead of just suggesting a generic whole-day entry.
 const STATUS_TO_TIMEOFF_LABEL = { OOO: "Approved", Sick: "Sick", Holiday: "Holiday", FloatingHoliday: "Floating Holiday", LOA: "LoA" };
+// Reverse of the above (derived, not hardcoded again, so it can't drift out of sync) — turns a
+// Time Off tab entry's label ("Approved", "Sick", ...) back into the matching cell-status code
+// ("OOO", "Sick", ...), used by computeAttendance as a fallback when a cell's own status field
+// was never actually written.
+const TIMEOFF_LABEL_TO_STATUS_MAP = Object.fromEntries(
+  Object.entries(STATUS_TO_TIMEOFF_LABEL).map(([status, label]) => [label, status])
+);
 function suggestedTimeOffLabel(block, emp) {
   const base = STATUS_TO_TIMEOFF_LABEL[block.type];
   if (!base) return null;
@@ -3724,7 +3744,7 @@ function PtoEvalTab({ employees, timeOff, timeOffDates, notes, updateNote, updat
   );
 }
 
-function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells }) {
+function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells, timeOffDates, scheduleArchive }) {
   const [selectedMonth, setSelectedMonth] = useState(currentPeriodKey());
   const [customPeriodOpen, setCustomPeriodOpen] = useState(false);
   const [csvFiles, setCsvFiles] = useState({ tickets: null, productivity: null, qa: null, hist: null });
@@ -3917,7 +3937,7 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells }) {
                     </thead>
                     <tbody>
                       {employees.map((emp) => {
-                        const att = computeAttendance(emp, cells, attReportStart, attReportEnd);
+                        const att = computeAttendance(emp, cells, attReportStart, attReportEnd, timeOffDates, scheduleArchive);
                         return (
                           <tr key={emp.id} className="border-t" style={{ borderColor: TH.border }}>
                             <td className="py-1.5 pr-3 font-medium text-slate-700">{emp.name}</td>
@@ -3962,7 +3982,7 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells }) {
             if (bonusWeekStart) {
               const weekEnd = new Date(bonusWeekStart + "T00:00:00");
               weekEnd.setDate(weekEnd.getDate() + 6);
-              const att = computeAttendance(emp, cells, bonusWeekStart, weekEnd.toISOString().slice(0, 10));
+              const att = computeAttendance(emp, cells, bonusWeekStart, weekEnd.toISOString().slice(0, 10), timeOffDates, scheduleArchive);
               daysWorkedThisWeek = att.workedDays;
               weeklyBaseline = rateTarget * 7 * att.workedDays;
             }
@@ -6100,6 +6120,8 @@ export default function ManagerSchedule() {
           qaEvals={data.qaEvals || {}}
           updateQaEvalBatch={updateQaEvalBatch}
           cells={cells}
+          timeOffDates={data.timeOffDates || []}
+          scheduleArchive={data.scheduleArchive || {}}
         />
       )}
 
