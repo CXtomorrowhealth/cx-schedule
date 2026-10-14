@@ -813,17 +813,18 @@ function ensureCoverageSync(dataObj) {
   return { data: { ...dataObj, cells, updatedAt: Date.now() }, changed: true };
 }
 
-// Weekly cleanup: on Mondays only, move any date older than this week's Monday (and its
-// cells) out of the live `dates`/`cells` — into `scheduleArchive` instead of deleting them —
-// so the live app stays lean but nothing is actually lost. Runs the moment the app is opened
-// on/after Monday (there's no server-side cron here, so "12:01am Monday" in practice means
-// "the first load once the date has rolled over to Monday"). Doesn't touch this week or next —
-// ensureAutoDates already guarantees those stay populated. A no-op every other day of the week,
-// and a no-op on Monday itself once there's nothing left to prune.
+// Weekly cleanup: move any date older than THIS week's Monday (and its cells) out of the live
+// `dates`/`cells` — into `scheduleArchive` instead of deleting them — so the live app stays lean
+// but nothing is actually lost. Deliberately runs on every load, not gated to "only if today
+// happens to be Monday" — that earlier version meant a week older than today's cutoff would sit
+// there forever if nobody happened to open the app on that one specific Monday. Checking the
+// cutoff unconditionally makes it self-healing: whatever day someone opens the app, anything
+// past the current week's Monday gets archived right then. Doesn't touch this week or next —
+// ensureAutoDates already guarantees those stay populated. A no-op once there's nothing left
+// older than the cutoff to prune.
 function pruneOldDatesOnMonday(dataObj) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  if (today.getDay() !== 1) return { data: dataObj, changed: false };
-  const mondayOffset = today.getDay() === 0 ? -6 : 1 - today.getDay(); // getDay() is 1 (Mon) here, so this is always 0
+  const mondayOffset = today.getDay() === 0 ? -6 : 1 - today.getDay();
   const monday = new Date(today); monday.setDate(today.getDate() + mondayOffset);
   const cutoff = monday.toISOString().slice(0, 10);
   const toRemove = (dataObj.dates || []).filter((d) => d < cutoff);
