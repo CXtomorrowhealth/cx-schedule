@@ -4105,6 +4105,7 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
 function BonusAttendanceTab({ employees, cells, timeOffDates, scheduleArchive, qaEvals }) {
   const [qaPeriod, setQaPeriod] = useState(currentPeriodKey());
   const [bonusInputs, setBonusInputs] = useState({});
+  const [bonusMode, setBonusMode] = useState("weekly"); // "weekly" | "monthly"
   const [bonusWeekStart, setBonusWeekStart] = useState("");
   const [attReportStart, setAttReportStart] = useState("");
   const [attReportEnd, setAttReportEnd] = useState("");
@@ -4188,35 +4189,57 @@ function BonusAttendanceTab({ employees, cells, timeOffDates, scheduleArchive, q
       </div>
 
       <div className="border rounded-lg p-4 mb-6" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
-        <h2 className="text-xs font-mono text-slate-500 uppercase tracking-wide mb-1">Weekly Backlog Bonus Check</h2>
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="text-xs font-mono text-slate-500 uppercase tracking-wide">{bonusMode === "monthly" ? "Monthly" : "Weekly"} Backlog Bonus Check</h2>
+          <div className="flex gap-1">
+            {["weekly", "monthly"].map((m) => (
+              <button key={m} onClick={() => setBonusMode(m)}
+                className={`text-[10px] px-2 py-1 rounded border font-mono capitalize ${bonusMode === m ? "border-teal-500 text-teal-700 bg-teal-50" : "border-slate-300 text-slate-500"}`}>
+                {m}
+              </button>
+            ))}
+          </div>
+        </div>
         <p className="text-[11px] text-slate-400 mb-3">
           Per person, using their own rate target (10/hr for Kaylee &amp; Shelyn, 13/hr everyone else) and the QA period selected above.
-          Enter this week's closed-ticket count and achieved pace to see which tier (if any) they hit. Not saved — a quick weekly check, not a tracked record.
+          {bonusMode === "monthly"
+            ? " Uses the same date range as the QA period above for attendance — scheduled, worked, and off days all come straight from the Schedule."
+            : " Baseline prorates to real days worked that week instead of assuming a full 5-day week."}
+          {" "}Enter the ticket count and achieved pace to see which tier (if any) they hit. Not saved — a quick check, not a tracked record.
         </p>
-        <div className="flex items-center gap-2 mb-3 text-xs text-slate-600">
-          <span>Week starting (Mon)</span>
-          <input type="date" value={bonusWeekStart} onChange={(e) => setBonusWeekStart(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
-          <span className="text-slate-400">Baseline prorates to real days worked that week instead of assuming a full 5-day week — e.g. 3 days worked = 3/5 of the normal target, not the full week.</span>
-        </div>
+        {bonusMode === "weekly" && (
+          <div className="flex items-center gap-2 mb-3 text-xs text-slate-600">
+            <span>Week starting (Mon)</span>
+            <input type="date" value={bonusWeekStart} onChange={(e) => setBonusWeekStart(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
+          </div>
+        )}
         <div className="space-y-1.5">
           {employees.map((emp) => {
             const rateTarget = emp.ticketRateTarget;
             if (rateTarget == null) return null;
-            let weeklyBaseline = rateTarget * 7 * 5; // fallback: 7 productive hrs/day × 5 workdays
-            let daysWorkedThisWeek = null;
-            if (bonusWeekStart) {
-              const weekEnd = new Date(bonusWeekStart + "T00:00:00");
-              weekEnd.setDate(weekEnd.getDate() + 6);
-              const att = computeAttendance(emp, cells, bonusWeekStart, weekEnd.toISOString().slice(0, 10), timeOffDates, scheduleArchive);
-              daysWorkedThisWeek = att.workedDays;
-              weeklyBaseline = rateTarget * 7 * att.workedDays;
+
+            const rangeStart = bonusMode === "monthly" ? qaStart : bonusWeekStart;
+            let rangeEnd = null;
+            if (bonusMode === "monthly") {
+              rangeEnd = qaEnd;
+            } else if (bonusWeekStart) {
+              const we = new Date(bonusWeekStart + "T00:00:00"); we.setDate(we.getDate() + 6);
+              rangeEnd = we.toISOString().slice(0, 10);
             }
+
+            let baseline = rateTarget * 7 * (bonusMode === "monthly" ? 22 : 5); // fallback before a range is set
+            let att = null;
+            if (rangeStart && rangeEnd) {
+              att = computeAttendance(emp, cells, rangeStart, rangeEnd, timeOffDates, scheduleArchive);
+              baseline = rateTarget * 7 * att.workedDays;
+            }
+
             const input = bonusInputs[emp.id] || { closed: "", rate: "" };
             const closedNum = input.closed === "" ? null : parseFloat(input.closed);
             const rateNum = input.rate === "" ? null : parseFloat(input.rate);
             const qaRaw = qaEvals[emp.id]?.[qaPeriod]?.qa;
             const qaVal = (qaRaw === "" || qaRaw == null) ? null : parseFloat(qaRaw);
-            const extra = closedNum != null ? closedNum - weeklyBaseline : null;
+            const extra = closedNum != null ? closedNum - baseline : null;
             const qaPass = qaVal != null && qaVal >= 90;
             const ratePass = rateNum != null && rateNum >= rateTarget;
             let tier = null, tierColor = "text-slate-400";
@@ -4228,23 +4251,30 @@ function BonusAttendanceTab({ employees, cells, timeOffDates, scheduleArchive, q
               else { tier = "No bonus — under +50 extra"; tierColor = "text-slate-500"; }
             }
             return (
-              <div key={emp.id} className="flex items-center gap-2.5 text-xs bg-white border rounded px-2.5 py-1.5" style={{ borderColor: TH.border }}>
-                <span className="font-medium text-slate-700 w-28 shrink-0 truncate">{emp.name}</span>
-                <span className="text-[10px] text-slate-400 font-mono w-24 shrink-0">
-                  {rateTarget}/hr · {Math.round(weeklyBaseline)}/wk{daysWorkedThisWeek != null ? ` (${daysWorkedThisWeek.toFixed(1)}d)` : ""}
-                </span>
-                <input type="number" placeholder="Closed this wk" value={input.closed}
-                  onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, closed: e.target.value } }))}
-                  className="w-24 border rounded px-1.5 py-1 text-xs" style={{ borderColor: TH.border }} />
-                <input type="number" placeholder="Rate achieved" value={input.rate}
-                  onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, rate: e.target.value } }))}
-                  className="w-24 border rounded px-1.5 py-1 text-xs" style={{ borderColor: TH.border }} />
-                <span className="text-[10px] text-slate-400 font-mono w-24 shrink-0">
-                  QA: {qaVal != null ? `${qaVal.toFixed(1)}%` : "no data"}
-                </span>
-                <span className={`text-[11px] flex-1 text-right ${tierColor}`}>
-                  {extra != null ? `+${extra} extra — ${tier}` : "—"}
-                </span>
+              <div key={emp.id} className="bg-white border rounded px-2.5 py-1.5" style={{ borderColor: TH.border }}>
+                <div className="flex items-center gap-2.5 text-xs">
+                  <span className="font-medium text-slate-700 w-28 shrink-0 truncate">{emp.name}</span>
+                  <span className="text-[10px] text-slate-400 font-mono w-28 shrink-0">
+                    {rateTarget}/hr · {Math.round(baseline)} target{att ? ` (${att.workedDays.toFixed(1)}d)` : ""}
+                  </span>
+                  <input type="number" placeholder="Closed" value={input.closed}
+                    onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, closed: e.target.value } }))}
+                    className="w-20 border rounded px-1.5 py-1 text-xs" style={{ borderColor: TH.border }} />
+                  <input type="number" placeholder="Rate achieved" value={input.rate}
+                    onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, rate: e.target.value } }))}
+                    className="w-24 border rounded px-1.5 py-1 text-xs" style={{ borderColor: TH.border }} />
+                  <span className="text-[10px] text-slate-400 font-mono w-20 shrink-0">
+                    QA: {qaVal != null ? `${qaVal.toFixed(1)}%` : "no data"}
+                  </span>
+                  <span className={`text-[11px] flex-1 text-right ${tierColor}`}>
+                    {extra != null ? `+${extra} extra — ${tier}` : "—"}
+                  </span>
+                </div>
+                {att && (
+                  <div className="text-[9.5px] text-slate-400 font-mono mt-1 pl-[7.5rem]">
+                    Scheduled {att.scheduledDays.toFixed(1)} · Worked {att.workedDays.toFixed(1)} · OOO {att.breakdown.OOO.toFixed(1)} · Sick {att.breakdown.Sick.toFixed(1)} · Holiday {att.breakdown.Holiday.toFixed(1)} · Floating Hol. {att.breakdown.FloatingHoliday.toFixed(1)} · LOA {att.breakdown.LOA.toFixed(1)}
+                  </div>
+                )}
               </div>
             );
           })}
