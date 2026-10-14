@@ -373,6 +373,12 @@ function isTrulyOffDay(dateStr, employees) {
 // a full allday status takes the day out of the "worked" count. Backs both the new Time Off &
 // Days Worked report and the bonus calculator's weekly proration, so both read the exact same
 // real schedule data instead of guessing or assuming a flat 5-day week.
+// 7 productive hours/day (8-hour shift minus 1 hour of breaks) — same convention used
+// everywhere else in this file (daily ticket targets, etc.) — used here as the denominator for
+// turning a partial-day absence into a fraction of a day, e.g. 2 hours OOO out of 7 = 0.29 day
+// off and 0.71 day worked, instead of a partial absence being ignored as a full day worked.
+const ATTENDANCE_PRODUCTIVE_HOURS = 7;
+
 function computeAttendance(emp, cells, startISO, endISO, timeOffDates, scheduleArchive) {
   const breakdown = { worked: 0, OOO: 0, Sick: 0, Holiday: 0, FloatingHoliday: 0, LOA: 0, notScheduled: 0 };
   const days = [];
@@ -382,9 +388,9 @@ function computeAttendance(emp, cells, startISO, endISO, timeOffDates, scheduleA
     const iso = d.toISOString().slice(0, 10);
     const dow = d.getDay();
     const isScheduledDay = !emp.workDays || emp.workDays.length === 0 || emp.workDays.includes(dow);
-    let category;
+    let category, fraction;
     if (!isScheduledDay) {
-      category = "notScheduled";
+      category = "notScheduled"; fraction = 1;
     } else {
       // Dates older than the current week get moved out of the live schedule into the archive
       // by the weekly cleanup — check there too, or every archived date silently defaults to
@@ -395,25 +401,43 @@ function computeAttendance(emp, cells, startISO, endISO, timeOffDates, scheduleA
       // worked instead of off.
       const rawStatus = cell && cell.status;
       const normalizedStatus = rawStatus === "PTO" ? "OOO" : rawStatus;
-      let dayCategory = (cell && normalizedStatus && cell.statusScope !== "partial" && breakdown.hasOwnProperty(normalizedStatus)) ? normalizedStatus : null;
+      let dayCategory = null, dayFraction = 0;
+      if (cell && normalizedStatus && breakdown.hasOwnProperty(normalizedStatus)) {
+        dayCategory = normalizedStatus;
+        if (cell.statusScope === "partial" && cell.statusStart && cell.statusEnd) {
+          const offHours = parseFloat(hoursBetween(cell.statusStart, cell.statusEnd)) || 0;
+          dayFraction = Math.min(1, offHours / ATTENDANCE_PRODUCTIVE_HOURS);
+        } else {
+          dayFraction = 1; // full allday status
+        }
+      }
       // Fallback: if the schedule cell itself never got the status written (Time Off tab entry
       // logged without syncing back to the cell), check the Time Off tab's own record for that
-      // date instead of missing it entirely.
+      // date instead of missing it entirely. timeOffDates entries don't carry partial-hours
+      // detail, so this fallback always assumes a full day.
       if (!dayCategory && timeOffDates && timeOffDates.length) {
         const entry = timeOffDates.find((td) => td.empId === emp.id && td.date === iso);
         if (entry) {
-          const mapped = TIMEOFF_LABEL_TO_STATUS_MAP[entry.label];
-          if (mapped && breakdown.hasOwnProperty(mapped)) dayCategory = mapped;
+          // entry.label might be the formatted label ("Floating Holiday") from one logging path,
+          // or the raw status code ("FloatingHoliday") from another — check both.
+          const mapped = TIMEOFF_LABEL_TO_STATUS_MAP[entry.label] || (breakdown.hasOwnProperty(entry.label) ? entry.label : null);
+          if (mapped && breakdown.hasOwnProperty(mapped)) { dayCategory = mapped; dayFraction = 1; }
         }
       }
       category = dayCategory || "worked";
+      fraction = dayCategory ? dayFraction : 1;
     }
-    breakdown[category] = (breakdown[category] || 0) + 1;
-    days.push({ date: iso, category });
+    breakdown[category] = (breakdown[category] || 0) + fraction;
+    // A partial-day absence leaves the rest of that day worked — e.g. 2hrs OOO (0.29 day) still
+    // leaves 0.71 day worked, it shouldn't vanish from "worked" just because part of the day was off.
+    if (category !== "worked" && category !== "notScheduled" && fraction < 1) {
+      breakdown.worked += (1 - fraction);
+    }
+    days.push({ date: iso, category, fraction });
     d.setDate(d.getDate() + 1);
   }
   const scheduledDays = days.length - breakdown.notScheduled;
-  return { breakdown, days, scheduledDays, workedDays: breakdown.worked };
+  return { breakdown, days, scheduledDays, workedDays: Math.round(breakdown.worked * 100) / 100 };
 }
 
 // Weekends only need the 8:00–17:30 window covered by at least one person to count as "covered" —
@@ -3939,16 +3963,17 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells, timeOffD
                     <tbody>
                       {employees.map((emp) => {
                         const att = computeAttendance(emp, cells, attReportStart, attReportEnd, timeOffDates, scheduleArchive);
+                        const fmt1 = (n) => (n || 0).toFixed(1);
                         return (
                           <tr key={emp.id} className="border-t" style={{ borderColor: TH.border }}>
                             <td className="py-1.5 pr-3 font-medium text-slate-700">{emp.name}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{att.scheduledDays}</td>
-                            <td className="py-1.5 pr-3 text-teal-700 font-semibold">{att.workedDays}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.OOO || 0}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.Sick || 0}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.Holiday || 0}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.FloatingHoliday || 0}</td>
-                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.LOA || 0}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.scheduledDays)}</td>
+                            <td className="py-1.5 pr-3 text-teal-700 font-semibold">{fmt1(att.workedDays)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.OOO)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.Sick)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.Holiday)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.FloatingHoliday)}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{fmt1(att.breakdown.LOA)}</td>
                           </tr>
                         );
                       })}
@@ -4007,7 +4032,7 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells, timeOffD
               <div key={emp.id} className="flex items-center gap-2.5 text-xs bg-white border rounded px-2.5 py-1.5" style={{ borderColor: TH.border }}>
                 <span className="font-medium text-slate-700 w-28 shrink-0 truncate">{emp.name}</span>
                 <span className="text-[10px] text-slate-400 font-mono w-24 shrink-0">
-                  {rateTarget}/hr · {weeklyBaseline}/wk{daysWorkedThisWeek != null ? ` (${daysWorkedThisWeek}d)` : ""}
+                  {rateTarget}/hr · {Math.round(weeklyBaseline)}/wk{daysWorkedThisWeek != null ? ` (${daysWorkedThisWeek.toFixed(1)}d)` : ""}
                 </span>
                 <input type="number" placeholder="Closed this wk" value={input.closed}
                   onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, closed: e.target.value } }))}
