@@ -4102,8 +4102,12 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
   );
 }
 
-function BonusAttendanceTab({ employees, cells, timeOffDates, scheduleArchive, qaEvals }) {
-  const [qaPeriod, setQaPeriod] = useState(currentPeriodKey());
+function BonusAttendanceTab({ employees, cells, timeOffDates, scheduleArchive, qaEvals, scorecardLastAcceptedPeriod }) {
+  // Defaults to whatever period was most recently accepted on CA Scorecard — re-evaluated each
+  // time this tab mounts (i.e. every time you navigate to it), so it follows along automatically
+  // instead of needing the date range kept in sync by hand. Still fully editable below if you
+  // want to check a different period during the same visit.
+  const [qaPeriod, setQaPeriod] = useState(scorecardLastAcceptedPeriod || currentPeriodKey());
   const [bonusInputs, setBonusInputs] = useState({});
   const [bonusMode, setBonusMode] = useState("weekly"); // "weekly" | "monthly"
   const [bonusWeekStart, setBonusWeekStart] = useState("");
@@ -4127,7 +4131,13 @@ function BonusAttendanceTab({ employees, cells, timeOffDates, scheduleArchive, q
         <span>to</span>
         <input type="date" value={qaEnd} onChange={(e) => setQaPeriod(periodKeyFromDates(qaStart || e.target.value, e.target.value))}
           className="bg-white border border-slate-300 rounded px-2 py-1 text-xs" />
-        <span className="text-slate-400">Should match whatever period is currently accepted on the CA Scorecard tab.</span>
+        {scorecardLastAcceptedPeriod && qaPeriod === scorecardLastAcceptedPeriod ? (
+          <span className="text-[11px] text-teal-700 font-medium">✓ Matches CA Scorecard's latest accepted period</span>
+        ) : (
+          <span className="text-[11px] text-amber-600 font-medium">
+            Manually set — doesn't match Scorecard's latest accepted period{scorecardLastAcceptedPeriod ? ` (${monthKeyLabel(scorecardLastAcceptedPeriod)})` : ""}
+          </span>
+        )}
       </div>
 
       <div className="border rounded-lg p-4 mb-6" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
@@ -5597,7 +5607,10 @@ export default function ManagerSchedule() {
       const empMonths = nextQaEvals[empId] || {};
       nextQaEvals[empId] = { ...empMonths, [monthKey]: { ...(empMonths[monthKey] || {}), ...patch } };
     });
-    persist({ ...base, qaEvals: nextQaEvals, updatedAt: Date.now() });
+    // Tracks whichever period was most recently accepted on CA Scorecard, so the Bonus &
+    // Attendance tab can default to it automatically instead of keeping its own separate date
+    // range that has to be manually kept in sync every time a new period is accepted.
+    persist({ ...base, qaEvals: nextQaEvals, scorecardLastAcceptedPeriod: monthKey, updatedAt: Date.now() });
   };
 
   const addTimeOffDate = (entry) => {
@@ -6281,6 +6294,7 @@ export default function ManagerSchedule() {
           timeOffDates={data.timeOffDates || []}
           scheduleArchive={data.scheduleArchive || {}}
           qaEvals={data.qaEvals || {}}
+          scorecardLastAcceptedPeriod={data.scorecardLastAcceptedPeriod}
         />
       )}
 
