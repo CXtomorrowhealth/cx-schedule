@@ -367,6 +367,37 @@ function isTrulyOffDay(dateStr, employees) {
   return !employees.some((e) => !e.workDays || e.workDays.length === 0 || e.workDays.includes(dow));
 }
 
+// Classifies every date in [startISO, endISO] for one employee as "worked", a specific time-off
+// category (OOO/Sick/Holiday/FloatingHoliday/LOA), or "notScheduled" (not one of their workdays
+// at all). A day with only a PARTIAL-day status (left early, etc.) still counts as worked — only
+// a full allday status takes the day out of the "worked" count. Backs both the new Time Off &
+// Days Worked report and the bonus calculator's weekly proration, so both read the exact same
+// real schedule data instead of guessing or assuming a flat 5-day week.
+function computeAttendance(emp, cells, startISO, endISO) {
+  const breakdown = { worked: 0, OOO: 0, Sick: 0, Holiday: 0, FloatingHoliday: 0, LOA: 0, notScheduled: 0 };
+  const days = [];
+  let d = new Date(startISO + "T00:00:00");
+  const end = new Date(endISO + "T00:00:00");
+  while (d <= end) {
+    const iso = d.toISOString().slice(0, 10);
+    const dow = d.getDay();
+    const isScheduledDay = !emp.workDays || emp.workDays.length === 0 || emp.workDays.includes(dow);
+    let category;
+    if (!isScheduledDay) {
+      category = "notScheduled";
+    } else {
+      const cell = cells[cellKey(emp.id, iso)];
+      const fullDayOff = cell && cell.status && cell.statusScope !== "partial" && breakdown.hasOwnProperty(cell.status);
+      category = fullDayOff ? cell.status : "worked";
+    }
+    breakdown[category] = (breakdown[category] || 0) + 1;
+    days.push({ date: iso, category });
+    d.setDate(d.getDate() + 1);
+  }
+  const scheduledDays = days.length - breakdown.notScheduled;
+  return { breakdown, days, scheduledDays, workedDays: breakdown.worked };
+}
+
 // Weekends only need the 8:00–17:30 window covered by at least one person to count as "covered" —
 // no need for the full working%/OOO% breakdown that weekdays get.
 function toMinutes(hhmm) {
@@ -3688,7 +3719,7 @@ function PtoEvalTab({ employees, timeOff, timeOffDates, notes, updateNote, updat
   );
 }
 
-function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
+function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch, cells }) {
   const [selectedMonth, setSelectedMonth] = useState(currentPeriodKey());
   const [customPeriodOpen, setCustomPeriodOpen] = useState(false);
   const [csvFiles, setCsvFiles] = useState({ tickets: null, productivity: null, qa: null, hist: null });
@@ -3703,6 +3734,10 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
   // everyone else) and that period's saved QA score. Not persisted — this is a quick weekly
   // gut-check, not a tracked record.
   const [bonusInputs, setBonusInputs] = useState({}); // { [empId]: { closed: "", rate: "" } }
+  const [bonusWeekStart, setBonusWeekStart] = useState(""); // shared week-start date used to prorate the baseline by real attendance
+  const [attReportStart, setAttReportStart] = useState("");
+  const [attReportEnd, setAttReportEnd] = useState("");
+  const [attReportOpen, setAttReportOpen] = useState(false);
 
   const handleCsvFile = (type, file) => {
     if (!file) return;
@@ -3846,16 +3881,86 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
       })()}
 
       <div className="border rounded-lg p-4 mb-6" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
+        <div className="flex items-center justify-between">
+          <h2 className="text-xs font-mono text-slate-500 uppercase tracking-wide mb-1">Time Off &amp; Days Worked Report</h2>
+          <button onClick={() => setAttReportOpen((v) => !v)} className="text-[11px] text-teal-700 underline">{attReportOpen ? "Hide" : "Show"}</button>
+        </div>
+        {attReportOpen && (() => {
+          const canRun = attReportStart && attReportEnd && attReportStart <= attReportEnd;
+          return (
+            <div className="mt-2">
+              <div className="flex items-center gap-2 mb-3 text-xs text-slate-600">
+                <span>From</span>
+                <input type="date" value={attReportStart} onChange={(e) => setAttReportStart(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
+                <span>to</span>
+                <input type="date" value={attReportEnd} onChange={(e) => setAttReportEnd(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
+              </div>
+              {canRun ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="text-slate-400 text-left">
+                        <th className="pb-1.5 pr-3">Person</th>
+                        <th className="pb-1.5 pr-3">Scheduled</th>
+                        <th className="pb-1.5 pr-3">Worked</th>
+                        <th className="pb-1.5 pr-3">OOO</th>
+                        <th className="pb-1.5 pr-3">Sick</th>
+                        <th className="pb-1.5 pr-3">Holiday</th>
+                        <th className="pb-1.5 pr-3">Floating Hol.</th>
+                        <th className="pb-1.5 pr-3">LOA</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {employees.map((emp) => {
+                        const att = computeAttendance(emp, cells, attReportStart, attReportEnd);
+                        return (
+                          <tr key={emp.id} className="border-t" style={{ borderColor: TH.border }}>
+                            <td className="py-1.5 pr-3 font-medium text-slate-700">{emp.name}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{att.scheduledDays}</td>
+                            <td className="py-1.5 pr-3 text-teal-700 font-semibold">{att.workedDays}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.OOO || 0}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.Sick || 0}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.Holiday || 0}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.FloatingHoliday || 0}</td>
+                            <td className="py-1.5 pr-3 text-slate-600">{att.breakdown.LOA || 0}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-400">Pick a start and end date to run the report.</p>
+              )}
+            </div>
+          );
+        })()}
+      </div>
+
+      <div className="border rounded-lg p-4 mb-6" style={{ borderColor: TH.border, backgroundColor: "#fafbfc" }}>
         <h2 className="text-xs font-mono text-slate-500 uppercase tracking-wide mb-1">Weekly Backlog Bonus Check</h2>
         <p className="text-[11px] text-slate-400 mb-3">
           Per person, using their own rate target (10/hr for Kaylee &amp; Shelyn, 13/hr everyone else) and this period's saved QA score.
           Enter this week's closed-ticket count and achieved pace to see which tier (if any) they hit. Not saved — a quick weekly check, not a tracked record.
         </p>
+        <div className="flex items-center gap-2 mb-3 text-xs text-slate-600">
+          <span>Week starting (Mon)</span>
+          <input type="date" value={bonusWeekStart} onChange={(e) => setBonusWeekStart(e.target.value)} className="border rounded px-2 py-1 text-xs" style={{ borderColor: TH.border }} />
+          <span className="text-slate-400">Baseline prorates to real days worked that week instead of assuming a full 5-day week — e.g. 3 days worked = 3/5 of the normal target, not the full week.</span>
+        </div>
         <div className="space-y-1.5">
           {employees.map((emp) => {
             const rateTarget = emp.ticketRateTarget;
             if (rateTarget == null) return null;
-            const weeklyBaseline = rateTarget * 7 * 5; // 7 productive hrs/day × 5 workdays
+            let weeklyBaseline = rateTarget * 7 * 5; // fallback: 7 productive hrs/day × 5 workdays
+            let daysWorkedThisWeek = null;
+            if (bonusWeekStart) {
+              const weekEnd = new Date(bonusWeekStart + "T00:00:00");
+              weekEnd.setDate(weekEnd.getDate() + 6);
+              const att = computeAttendance(emp, cells, bonusWeekStart, weekEnd.toISOString().slice(0, 10));
+              daysWorkedThisWeek = att.workedDays;
+              weeklyBaseline = rateTarget * 7 * att.workedDays;
+            }
             const input = bonusInputs[emp.id] || { closed: "", rate: "" };
             const closedNum = input.closed === "" ? null : parseFloat(input.closed);
             const rateNum = input.rate === "" ? null : parseFloat(input.rate);
@@ -3875,7 +3980,9 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
             return (
               <div key={emp.id} className="flex items-center gap-2.5 text-xs bg-white border rounded px-2.5 py-1.5" style={{ borderColor: TH.border }}>
                 <span className="font-medium text-slate-700 w-28 shrink-0 truncate">{emp.name}</span>
-                <span className="text-[10px] text-slate-400 font-mono w-20 shrink-0">{rateTarget}/hr · {weeklyBaseline}/wk</span>
+                <span className="text-[10px] text-slate-400 font-mono w-24 shrink-0">
+                  {rateTarget}/hr · {weeklyBaseline}/wk{daysWorkedThisWeek != null ? ` (${daysWorkedThisWeek}d)` : ""}
+                </span>
                 <input type="number" placeholder="Closed this wk" value={input.closed}
                   onChange={(e) => setBonusInputs((p) => ({ ...p, [emp.id]: { ...input, closed: e.target.value } }))}
                   className="w-24 border rounded px-1.5 py-1 text-xs" style={{ borderColor: TH.border }} />
@@ -5987,6 +6094,7 @@ export default function ManagerSchedule() {
           employees={employees}
           qaEvals={data.qaEvals || {}}
           updateQaEvalBatch={updateQaEvalBatch}
+          cells={cells}
         />
       )}
 
