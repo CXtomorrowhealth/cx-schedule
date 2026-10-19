@@ -3926,6 +3926,7 @@ function CaScorecardTab({ employees, qaEvals, updateQaEvalBatch }) {
       if (!emp) return;
       const patch = {};
       if (vals.tickets != null) patch.tickets = vals.tickets;
+      if (vals.ticketCount != null) patch.ticketCount = vals.ticketCount; // raw closed-ticket count — the Bonus tab reads this
       if (vals.availablePct != null) patch.availablePct = vals.availablePct;
       if (vals.acw != null) patch.acw = vals.acw;
       if (vals.qa != null) patch.qa = vals.qa;
@@ -4302,7 +4303,7 @@ function BonusTab({ employees, cells, timeOffDates, scheduleArchive, qaEvals, sc
           {bonusMode === "monthly"
             ? " Uses the same date range as the QA period above — scheduled, worked, and off days all come straight from the Schedule."
             : " Baseline prorates to real days worked that week instead of assuming a full 5-day week."}
-          {" "}Enter the ticket count and achieved pace (or import a CSV), then Save to keep a record.
+          {" "}In monthly mode, closed tickets and rate fill in automatically from the CA Scorecard upload for that period (you can still overtype them); weekly mode needs them entered or imported. Then Save to keep a record.
         </p>
         {bonusMode === "weekly" && (
           <div className="flex items-center gap-2 mb-3 text-xs text-slate-600">
@@ -4333,8 +4334,19 @@ function BonusTab({ employees, cells, timeOffDates, scheduleArchive, qaEvals, sc
 
             const key = rangeReady ? recKey(emp) : null;
             const saved = key ? bonusRecords[key] : null;
-            const input = (key && bonusInputs[key]) || (saved ? { closed: String(saved.closed), rate: String(saved.rate) } : { closed: "", rate: "" });
-            const setInput = (patch) => { if (key) setBonusInputs((p) => ({ ...p, [key]: { ...input, ...patch } })); };
+            // Pre-fill from the CA Scorecard record for this period (monthly mode only — the scorecard
+            // is saved per period, so a single week can't be read from it). Anything typed wins.
+            const sc = bonusMode === "monthly" ? qaEvals[emp.id]?.[qaPeriod] : null;
+            const autoClosed = sc && sc.ticketCount != null ? String(sc.ticketCount) : "";
+            const autoRate = sc && sc.tickets != null ? String(sc.tickets) : "";
+            const typed = (key && bonusInputs[key]) || {};
+            const base = saved ? { closed: String(saved.closed), rate: String(saved.rate) } : { closed: autoClosed, rate: autoRate };
+            const input = {
+              closed: typed.closed !== undefined ? typed.closed : base.closed,
+              rate: typed.rate !== undefined ? typed.rate : base.rate,
+            };
+            const fromScorecard = !saved && ((typed.closed === undefined && autoClosed !== "") || (typed.rate === undefined && autoRate !== ""));
+            const setInput = (patch) => { if (key) setBonusInputs((p) => ({ ...p, [key]: { ...(p[key] || {}), ...patch } })); };
             const closedNum = input.closed === "" ? null : parseFloat(input.closed);
             const rateNum = input.rate === "" ? null : parseFloat(input.rate);
             const qaRaw = qaEvals[emp.id]?.[qaPeriod]?.qa;
@@ -4375,7 +4387,7 @@ function BonusTab({ employees, cells, timeOffDates, scheduleArchive, qaEvals, sc
                 </div>
                 {att && (
                   <div className="text-[9.5px] text-slate-400 font-mono mt-1 pl-[7.5rem]">
-                    Scheduled {att.scheduledDays.toFixed(1)} · Worked {att.workedDays.toFixed(1)} · OOO {att.breakdown.OOO.toFixed(1)} · Sick {att.breakdown.Sick.toFixed(1)} · Holiday {att.breakdown.Holiday.toFixed(1)} · Floating Hol. {att.breakdown.FloatingHoliday.toFixed(1)} · LOA {att.breakdown.LOA.toFixed(1)}{saved ? " · saved" : ""}
+                    Scheduled {att.scheduledDays.toFixed(1)} · Worked {att.workedDays.toFixed(1)} · OOO {att.breakdown.OOO.toFixed(1)} · Sick {att.breakdown.Sick.toFixed(1)} · Holiday {att.breakdown.Holiday.toFixed(1)} · Floating Hol. {att.breakdown.FloatingHoliday.toFixed(1)} · LOA {att.breakdown.LOA.toFixed(1)}{saved ? " · saved" : ""}{fromScorecard ? " · closed/rate pre-filled from CA Scorecard" : ""}
                   </div>
                 )}
               </div>
