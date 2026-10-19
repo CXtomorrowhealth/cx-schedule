@@ -983,6 +983,21 @@ function ensureEmployeeEmails(dataObj) {
 // This only sets the default once per employee; a manager toggling it in CA Eval always wins
 // after that.
 const DEFAULT_TICKETS_EXEMPT = ["kalei-harris"];
+// People who spend part of each day in project time: Available % is not scored for them (their
+// ticket target is per available hour, so it already accounts for that time). Default set once;
+// a manager can toggle it in CA Eval.
+const DEFAULT_AVAILABLE_EXEMPT = ["kalei-harris"];
+function ensureAvailableExemptDefaults(dataObj) {
+  let changed = false;
+  const nextEmployees = (dataObj.employees || []).map((e) => {
+    if (e.availableExempt !== undefined) return e;
+    if (!DEFAULT_AVAILABLE_EXEMPT.includes(e.id)) return e;
+    changed = true;
+    return { ...e, availableExempt: true };
+  });
+  if (!changed) return { data: dataObj, changed: false };
+  return { data: { ...dataObj, employees: nextEmployees }, changed: true };
+}
 // One-time backfill: the real spreadsheet comments (exact reasons like "Dentist appt" or
 // "covering for audrey 8/15") were extracted from the original Excel file after the fact, so
 // existing saved data won't have them yet. This patches any Time Off entry that's missing a
@@ -2834,6 +2849,7 @@ const METRIC_TILE_LABELS = { tickets: "Tickets/hr", availablePct: "Available", a
 // (green/amber/red) so a manager can scan a whole grid of tiles without reading numbers.
 function metricTierClasses(key, value, emp) {
   if (key === "tickets" && emp?.ticketsExempt) return "bg-slate-50 text-slate-400 border-slate-100";
+  if (key === "availablePct" && emp?.availableExempt) return "bg-slate-50 text-slate-400 border-slate-100";
   if (value == null) return "bg-slate-50 text-slate-300 border-slate-100";
   if (key === "tickets") {
     const tb = caTicketTarget(emp);
@@ -2899,7 +2915,7 @@ function qaOverallScore(ev) {
   let weightedSum = 0, weightTotal = 0;
   const add = (key, score) => { if (score == null) return; weightedSum += score * CA_OVERALL_WEIGHTS[key]; weightTotal += CA_OVERALL_WEIGHTS[key]; };
   if (ev.tickets != null) add("tickets", Math.min((ev.tickets / (ev.ticketTarget || CA_TICKET_BENCHMARK)) * 100, 100));
-  if (ev.availablePct != null) add("availablePct", Math.min((ev.availablePct / CA_AVAIL_GOOD) * 100, 100));
+  if (ev.availablePct != null && !ev.availableExempt) add("availablePct", Math.min((ev.availablePct / CA_AVAIL_GOOD) * 100, 100));
   if (ev.qa != null) add("qa", ev.qa);
   if (ev.acw != null) add("acw", Math.max(0, 100 - ev.acw));
   // SLA and Answer Rate have a flat 90% target: full marks at 90%+, and 5 points off for every
@@ -2914,7 +2930,7 @@ function qaOverallScore(ev) {
 // a partial formula (e.g. no QA tickets reviewed yet, or tickets-exempt), so a score computed
 // from only 2 of 4 factors never looks identical to a full one.
 function qaOverallComplete(ev) {
-  return ev.tickets != null && ev.availablePct != null && ev.qa != null && ev.acw != null && ev.sla != null && ev.answerRate != null;
+  return ev.tickets != null && (ev.availablePct != null || ev.availableExempt) && ev.qa != null && ev.acw != null && ev.sla != null && ev.answerRate != null;
 }
 
 // Same bullet logic as the standalone tool's analyzeAgent(), just returning plain strings.
@@ -2934,7 +2950,7 @@ function analyzeCaEval(ev, avgQa) {
       improvements.push(`Tickets/avail hr of ${ev.tickets.toFixed(2)} is ${Math.abs(diff)} below the target of ${TB}. Review queue management, wrap-up habits, and handle time.`);
   }
 
-  if (ev.availablePct != null) {
+  if (ev.availablePct != null && !ev.availableExempt) {
     if (ev.availablePct > CA_AVAIL_GOOD + 10)
       highlights.push(`Available ${ev.availablePct.toFixed(1)}% of the time — well above the 50% threshold. Strong schedule adherence.`);
     else if (ev.availablePct >= CA_AVAIL_GOOD)
@@ -2964,7 +2980,7 @@ function analyzeCaEval(ev, avgQa) {
 
   if (ev.tickets != null && ev.acw != null && ev.tickets < TB && ev.acw >= CA_ACW_LIMIT)
     coaching.push("Both low ticket volume and high ACW suggest wrap-up time is a key driver — prioritize ACW coaching first.");
-  if (ev.availablePct != null && ev.acw != null && ev.availablePct < CA_AVAIL_GOOD && ev.acw >= CA_ACW_LIMIT)
+  if (ev.availablePct != null && !ev.availableExempt && ev.acw != null && ev.availablePct < CA_AVAIL_GOOD && ev.acw >= CA_ACW_LIMIT)
     coaching.push("High ACW is directly reducing availability. Tackling ACW will likely resolve both metrics together.");
   if (ev.qa === 100 && ev.tickets != null && ev.tickets >= TB)
     highlights.push("Hitting both the QA and throughput targets simultaneously — a strong all-round performer.");
@@ -3308,6 +3324,7 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
 
     const ev = {
       ticketTarget: caTicketTarget(emp),
+      availableExempt: !!emp.availableExempt,
       tickets: numOrNull(raw.tickets), availablePct: numOrNull(raw.availablePct), acw: numOrNull(raw.acw), qa: numOrNull(raw.qa),
       sla: numOrNull(raw.hist?.sla), answerRate: numOrNull(raw.hist?.answerRate),
     };
@@ -3344,7 +3361,7 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
     const barW = 78, barX = margin + 42, valX = barX + barW + 4, badgeRightX = pw - margin;
     const metricDefs = [
       { key: "tickets", label: "Tickets / available hr", sub: `Target: ${Number(ev.ticketTarget).toFixed(2)}`, rgb: [0, 168, 120], fmt: (v) => v.toFixed(2), maxRef: Math.max(ev.tickets || 0, ev.ticketTarget) * 1.05 },
-      { key: "availablePct", label: "Available %", sub: `Target: >${CA_AVAIL_GOOD}%`, rgb: [242, 108, 80], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
+      { key: "availablePct", label: "Available %", sub: ev.availableExempt ? "Not scored - project time" : `Target: >${CA_AVAIL_GOOD}%`, rgb: [242, 108, 80], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
       { key: "acw", label: "After Call Work %", sub: `Limit: <${Math.round(CA_ACW_LIMIT)}%`, rgb: [59, 130, 246], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
       { key: "qa", label: "QA score", sub: "Yes=100% · Partial=50% · No=0%", rgb: [124, 58, 237], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
       { key: "sla", label: "Service Level (60s)", sub: "Target: 90% or higher", rgb: [8, 145, 178], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
@@ -3362,7 +3379,7 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
       doc.setFillColor(...m.rgb); if (fillW > 0.5) doc.roundedRect(barX, y, fillW, 5.5, 1, 1, "F");
       doc.setTextColor(13, 34, 51); doc.setFontSize(9.5); doc.setFont("helvetica", "bold");
       doc.text(m.fmt(val), valX, y + 4.5);
-      const badge = scorecardBadge(m.key, val, ev.ticketTarget);
+      const badge = (m.key === "availablePct" && ev.availableExempt) ? null : scorecardBadge(m.key, val, ev.ticketTarget);
       if (badge) drawBadge(badge.text, badge.tone, badgeRightX, y + 4.2);
       y += 13;
     });
@@ -4492,6 +4509,7 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
     };
     const ev = {
       ticketTarget: caTicketTarget(emp),
+      availableExempt: !!emp.availableExempt,
       tickets: emp.ticketsExempt ? null : rangeAvg("tickets"),
       availablePct: rangeAvg("availablePct"),
       acw: rangeAvg("acw"),
@@ -4795,6 +4813,10 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
                   <label className="flex items-center gap-1 mt-2.5 text-[10px] text-slate-500 cursor-pointer">
                     <input type="checkbox" checked={!!emp.ticketsExempt} onChange={(e) => updateEmployee(emp.id, "ticketsExempt", e.target.checked)} className="accent-teal-500" />
                     Project time — don't score tickets
+                  </label>
+                  <label className="flex items-center gap-1 mt-1 text-[10px] text-slate-500 cursor-pointer">
+                    <input type="checkbox" checked={!!emp.availableExempt} onChange={(e) => updateEmployee(emp.id, "availableExempt", e.target.checked)} className="accent-teal-500" />
+                    Project time — don't score Available %
                   </label>
                 </div>
               )}
@@ -5184,6 +5206,8 @@ export default function ManagerSchedule() {
           parsed = emailed.data;
           const exempted = ensureTicketsExemptDefaults(parsed);
           parsed = exempted.data;
+          const availExempted = ensureAvailableExemptDefaults(parsed);
+          parsed = availExempted.data;
           const qaMonthly = ensureQaEvalMonthly(parsed);
           parsed = qaMonthly.data;
           const commentsBackfilled = ensureTimeOffComments(parsed);
@@ -5200,7 +5224,7 @@ export default function ManagerSchedule() {
           parsed = weekdayShiftsApplied.data;
           const rateTargetsBackfilled = ensureTicketRateTargets(parsed);
           parsed = rateTargetsBackfilled.data;
-          if (pruned.changed || filled.changed || pinned.changed || emailed.changed || exempted.changed || qaMonthly.changed || commentsBackfilled.changed || weekendRulesAdded.changed || scFilled.changed || coverageSynced.changed || audreyShiftBackfilled.changed || weekdayShiftsApplied.changed || rateTargetsBackfilled.changed) await storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
+          if (pruned.changed || filled.changed || pinned.changed || emailed.changed || exempted.changed || qaMonthly.changed || commentsBackfilled.changed || weekendRulesAdded.changed || scFilled.changed || coverageSynced.changed || audreyShiftBackfilled.changed || weekdayShiftsApplied.changed || rateTargetsBackfilled.changed || availExempted.changed) await storage.set(STORAGE_KEY, JSON.stringify(parsed), true);
         }
         setData(parsed);
       } else if (!isPoll) {
@@ -5209,6 +5233,7 @@ export default function ManagerSchedule() {
         seeded = ensureEmployeePins(seeded).data;
         seeded = ensureEmployeeEmails(seeded).data;
         seeded = ensureTicketsExemptDefaults(seeded).data;
+        seeded = ensureAvailableExemptDefaults(seeded).data;
         seeded = applyWeekdayShiftOverrides(seeded).data;
         setData(seeded);
         await storage.set(STORAGE_KEY, JSON.stringify(seeded), true);
