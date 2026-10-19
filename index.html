@@ -2824,7 +2824,8 @@ function PacingBar({ values, color, height = 26 }) {
 // ── CA performance eval — same scoring model as the standalone CA Scorecard tool ──
 // Tickets/avail-hr benchmark, Available%/ACW% targets, and QA-score bands are the same numbers
 // used there, so a rating here means the same thing it would mean in that tool.
-const CA_TICKET_BENCHMARK = 7;
+const CA_TICKET_BENCHMARK = 7; // fallback only — each CA's real target is their Ticket Rate in the Roster tab (10 or 13/hr)
+function caTicketTarget(emp) { return (emp && emp.ticketRateTarget != null) ? emp.ticketRateTarget : CA_TICKET_BENCHMARK; }
 const CA_AVAIL_GOOD = 50;   // Available % should be above this
 const CA_ACW_LIMIT = 33.3;  // ACW % should be under this
 
@@ -2835,8 +2836,9 @@ function metricTierClasses(key, value, emp) {
   if (key === "tickets" && emp?.ticketsExempt) return "bg-slate-50 text-slate-400 border-slate-100";
   if (value == null) return "bg-slate-50 text-slate-300 border-slate-100";
   if (key === "tickets") {
-    if (value >= CA_TICKET_BENCHMARK) return "bg-teal-50 text-teal-800 border-teal-200";
-    if (value >= CA_TICKET_BENCHMARK * 0.85) return "bg-amber-50 text-amber-800 border-amber-200";
+    const tb = caTicketTarget(emp);
+    if (value >= tb) return "bg-teal-50 text-teal-800 border-teal-200";
+    if (value >= tb * 0.85) return "bg-amber-50 text-amber-800 border-amber-200";
     return "bg-rose-50 text-rose-800 border-rose-200";
   }
   if (key === "availablePct") {
@@ -2896,7 +2898,7 @@ const CA_OVERALL_WEIGHTS = { qa: 0.40, tickets: 0.15, availablePct: 0.10, acw: 0
 function qaOverallScore(ev) {
   let weightedSum = 0, weightTotal = 0;
   const add = (key, score) => { if (score == null) return; weightedSum += score * CA_OVERALL_WEIGHTS[key]; weightTotal += CA_OVERALL_WEIGHTS[key]; };
-  if (ev.tickets != null) add("tickets", Math.min((ev.tickets / CA_TICKET_BENCHMARK) * 100, 100));
+  if (ev.tickets != null) add("tickets", Math.min((ev.tickets / (ev.ticketTarget || CA_TICKET_BENCHMARK)) * 100, 100));
   if (ev.availablePct != null) add("availablePct", Math.min((ev.availablePct / CA_AVAIL_GOOD) * 100, 100));
   if (ev.qa != null) add("qa", ev.qa);
   if (ev.acw != null) add("acw", Math.max(0, 100 - ev.acw));
@@ -2918,17 +2920,18 @@ function qaOverallComplete(ev) {
 // Same bullet logic as the standalone tool's analyzeAgent(), just returning plain strings.
 function analyzeCaEval(ev, avgQa) {
   const highlights = [], improvements = [], coaching = [];
+  const TB = ev.ticketTarget || CA_TICKET_BENCHMARK;
 
   if (ev.tickets != null) {
-    const diff = (ev.tickets - CA_TICKET_BENCHMARK).toFixed(2);
-    if (ev.tickets >= CA_TICKET_BENCHMARK * 1.15)
-      highlights.push(`Tickets/avail hr of ${ev.tickets.toFixed(2)} is well above the team benchmark of ${CA_TICKET_BENCHMARK} — strong throughput.`);
-    else if (ev.tickets >= CA_TICKET_BENCHMARK)
-      highlights.push(`Tickets/avail hr of ${ev.tickets.toFixed(2)} meets the benchmark of ${CA_TICKET_BENCHMARK}.`);
-    else if (ev.tickets >= CA_TICKET_BENCHMARK * 0.85)
-      coaching.push(`Tickets/avail hr (${ev.tickets.toFixed(2)}) is just below the ${CA_TICKET_BENCHMARK} benchmark. Focus on reducing handle time to close the gap.`);
+    const diff = (ev.tickets - TB).toFixed(2);
+    if (ev.tickets >= TB * 1.15)
+      highlights.push(`Tickets/avail hr of ${ev.tickets.toFixed(2)} is well above the target of ${TB} — strong throughput.`);
+    else if (ev.tickets >= TB)
+      highlights.push(`Tickets/avail hr of ${ev.tickets.toFixed(2)} meets the target of ${TB}.`);
+    else if (ev.tickets >= TB * 0.85)
+      coaching.push(`Tickets/avail hr (${ev.tickets.toFixed(2)}) is just below the ${TB} target. Focus on reducing handle time to close the gap.`);
     else
-      improvements.push(`Tickets/avail hr of ${ev.tickets.toFixed(2)} is ${Math.abs(diff)} below the team benchmark of ${CA_TICKET_BENCHMARK}. Review queue management, wrap-up habits, and handle time.`);
+      improvements.push(`Tickets/avail hr of ${ev.tickets.toFixed(2)} is ${Math.abs(diff)} below the target of ${TB}. Review queue management, wrap-up habits, and handle time.`);
   }
 
   if (ev.availablePct != null) {
@@ -2959,11 +2962,11 @@ function analyzeCaEval(ev, avgQa) {
     else improvements.push(`QA score of ${ev.qa.toFixed(1)}% needs attention — multiple tickets had incorrect or partial actions. Schedule a 1:1 QA review session.`);
   }
 
-  if (ev.tickets != null && ev.acw != null && ev.tickets < CA_TICKET_BENCHMARK && ev.acw >= CA_ACW_LIMIT)
+  if (ev.tickets != null && ev.acw != null && ev.tickets < TB && ev.acw >= CA_ACW_LIMIT)
     coaching.push("Both low ticket volume and high ACW suggest wrap-up time is a key driver — prioritize ACW coaching first.");
   if (ev.availablePct != null && ev.acw != null && ev.availablePct < CA_AVAIL_GOOD && ev.acw >= CA_ACW_LIMIT)
     coaching.push("High ACW is directly reducing availability. Tackling ACW will likely resolve both metrics together.");
-  if (ev.qa === 100 && ev.tickets != null && ev.tickets >= CA_TICKET_BENCHMARK)
+  if (ev.qa === 100 && ev.tickets != null && ev.tickets >= TB)
     highlights.push("Hitting both the QA and throughput targets simultaneously — a strong all-round performer.");
 
   if (!highlights.length && !improvements.length && !coaching.length)
@@ -3191,10 +3194,10 @@ function loadJsPdf() {
 // "Meets target", "Excellent", "Perfect", vs "Below target", "Below 50%", "Over limit",
 // "Needs work". Thresholds reuse the same constants as analyzeCaEval's bullet-point tiering,
 // just collapsed into the shorter badge text the original template actually uses.
-function scorecardBadge(metric, value) {
+function scorecardBadge(metric, value, ticketTarget) {
   if (value == null) return null;
   if (metric === "tickets") {
-    return value >= CA_TICKET_BENCHMARK ? { text: "On track", tone: "good" } : { text: "Below target", tone: "bad" };
+    return value >= (ticketTarget || CA_TICKET_BENCHMARK) ? { text: "On track", tone: "good" } : { text: "Below target", tone: "bad" };
   }
   if (metric === "availablePct") {
     if (value >= CA_AVAIL_GOOD + 10) return { text: "On track", tone: "good" };
@@ -3304,6 +3307,7 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
     y += 26;
 
     const ev = {
+      ticketTarget: caTicketTarget(emp),
       tickets: numOrNull(raw.tickets), availablePct: numOrNull(raw.availablePct), acw: numOrNull(raw.acw), qa: numOrNull(raw.qa),
       sla: numOrNull(raw.hist?.sla), answerRate: numOrNull(raw.hist?.answerRate),
     };
@@ -3339,7 +3343,7 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
 
     const barW = 78, barX = margin + 42, valX = barX + barW + 4, badgeRightX = pw - margin;
     const metricDefs = [
-      { key: "tickets", label: "Tickets / available hr", sub: `Benchmark: ${CA_TICKET_BENCHMARK.toFixed(2)}`, rgb: [0, 168, 120], fmt: (v) => v.toFixed(2), maxRef: Math.max(ev.tickets || 0, CA_TICKET_BENCHMARK) * 1.05 },
+      { key: "tickets", label: "Tickets / available hr", sub: `Target: ${Number(ev.ticketTarget).toFixed(2)}`, rgb: [0, 168, 120], fmt: (v) => v.toFixed(2), maxRef: Math.max(ev.tickets || 0, ev.ticketTarget) * 1.05 },
       { key: "availablePct", label: "Available %", sub: `Target: >${CA_AVAIL_GOOD}%`, rgb: [242, 108, 80], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
       { key: "acw", label: "After Call Work %", sub: `Limit: <${Math.round(CA_ACW_LIMIT)}%`, rgb: [59, 130, 246], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
       { key: "qa", label: "QA score", sub: "Yes=100% · Partial=50% · No=0%", rgb: [124, 58, 237], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
@@ -3358,7 +3362,7 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
       doc.setFillColor(...m.rgb); if (fillW > 0.5) doc.roundedRect(barX, y, fillW, 5.5, 1, 1, "F");
       doc.setTextColor(13, 34, 51); doc.setFontSize(9.5); doc.setFont("helvetica", "bold");
       doc.text(m.fmt(val), valX, y + 4.5);
-      const badge = scorecardBadge(m.key, val);
+      const badge = scorecardBadge(m.key, val, ev.ticketTarget);
       if (badge) drawBadge(badge.text, badge.tone, badgeRightX, y + 4.2);
       y += 13;
     });
@@ -4487,6 +4491,7 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
       return vals.length ? avg(vals) : null;
     };
     const ev = {
+      ticketTarget: caTicketTarget(emp),
       tickets: emp.ticketsExempt ? null : rangeAvg("tickets"),
       availablePct: rangeAvg("availablePct"),
       acw: rangeAvg("acw"),
@@ -4566,7 +4571,7 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
         <div className="rounded-lg p-3" style={{ backgroundColor: TH.navy }}>
           <div className="text-[10px] uppercase tracking-wide text-white/50 mb-1">Avg tickets/hr</div>
           <div className="text-xl font-semibold text-white">{avgTickets != null ? avgTickets.toFixed(2) : "—"}</div>
-          <div className="text-[10px] text-white/40 mt-0.5">benchmark {CA_TICKET_BENCHMARK}</div>
+          <div className="text-[10px] text-white/40 mt-0.5">target 10 or 13 per person</div>
         </div>
         <div className="rounded-lg p-3" style={{ backgroundColor: TH.navy }}>
           <div className="text-[10px] uppercase tracking-wide text-white/50 mb-1">Avg available %</div>
