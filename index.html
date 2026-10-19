@@ -3341,8 +3341,8 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
       { key: "availablePct", label: "Available %", sub: `Target: >${CA_AVAIL_GOOD}%`, rgb: [242, 108, 80], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
       { key: "acw", label: "After Call Work %", sub: `Limit: <${Math.round(CA_ACW_LIMIT)}%`, rgb: [59, 130, 246], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
       { key: "qa", label: "QA score", sub: "Yes=100% · Partial=50% · No=0%", rgb: [124, 58, 237], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
-      { key: "sla", label: "Service Level (60s)", sub: "Target: ≥90%", rgb: [8, 145, 178], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
-      { key: "answerRate", label: "Answer Rate", sub: "Target: ≥90%", rgb: [217, 70, 160], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
+      { key: "sla", label: "Service Level (60s)", sub: "Target: 90% or higher", rgb: [8, 145, 178], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
+      { key: "answerRate", label: "Answer Rate", sub: "Target: 90% or higher", rgb: [217, 70, 160], fmt: (v) => v.toFixed(1) + "%", maxRef: 100 },
     ];
     metricDefs.forEach((m) => {
       const val = ev[m.key];
