@@ -2888,11 +2888,11 @@ function qaOverallLabel(o) {
 // marks. (Available% can't just use the raw percentage: nobody is ever available 100% of their
 // shift, so that would make a perfect score mathematically unreachable even for someone crushing
 // the actual >50% target.) ACW% is inverted (100 - ACW, since lower is better), QA is used
-// directly (already 0-100). Weighted 55% QA / 15% each for the other three. If a factor is
+// directly (already 0-100). Weighted 55% QA / 15% Tickets / 7.5% each for Available, ACW, SLA and Answer Rate. If a factor is
 // missing for someone that month (e.g. no ticket data yet), its weight drops out and the rest
 // renormalize — a missing metric never silently zeros someone out, but also never accidentally
 // cancels out a bad number the way a percentile-based version could.
-const CA_OVERALL_WEIGHTS = { qa: 0.55, tickets: 0.15, availablePct: 0.15, acw: 0.15 };
+const CA_OVERALL_WEIGHTS = { qa: 0.55, tickets: 0.15, availablePct: 0.075, acw: 0.075, sla: 0.075, answerRate: 0.075 };
 function qaOverallScore(ev) {
   let weightedSum = 0, weightTotal = 0;
   const add = (key, score) => { if (score == null) return; weightedSum += score * CA_OVERALL_WEIGHTS[key]; weightTotal += CA_OVERALL_WEIGHTS[key]; };
@@ -2900,6 +2900,9 @@ function qaOverallScore(ev) {
   if (ev.availablePct != null) add("availablePct", Math.min((ev.availablePct / CA_AVAIL_GOOD) * 100, 100));
   if (ev.qa != null) add("qa", ev.qa);
   if (ev.acw != null) add("acw", Math.max(0, 100 - ev.acw));
+  // SLA and Answer Rate both have a flat 90% target — scored as a ratio to it, capped at 100.
+  if (ev.sla != null) add("sla", Math.min((ev.sla / 90) * 100, 100));
+  if (ev.answerRate != null) add("answerRate", Math.min((ev.answerRate / 90) * 100, 100));
   return weightTotal > 0 ? Math.round(weightedSum / weightTotal) : null;
 }
 
@@ -2907,7 +2910,7 @@ function qaOverallScore(ev) {
 // a partial formula (e.g. no QA tickets reviewed yet, or tickets-exempt), so a score computed
 // from only 2 of 4 factors never looks identical to a full one.
 function qaOverallComplete(ev) {
-  return ev.tickets != null && ev.availablePct != null && ev.qa != null && ev.acw != null;
+  return ev.tickets != null && ev.availablePct != null && ev.qa != null && ev.acw != null && ev.sla != null && ev.answerRate != null;
 }
 
 // Same bullet logic as the standalone tool's analyzeAgent(), just returning plain strings.
@@ -3304,8 +3307,8 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
     };
 
     // Combined Overall score — individual, target-based (not ranked against teammates): each
-    // factor scored 0-100 against its own fixed benchmark, weighted 55% QA / 15% each for
-    // Tickets, Available%, ACW. Shows just the tier word ("Good"), same as before.
+    // factor scored 0-100 against its own fixed benchmark, weighted 55% QA / 15% Tickets /
+    // 7.5% each for Available%, ACW, SLA, Answer Rate. Shows just the tier word ("Good"), same as before.
     const overall = qaOverallScore(ev);
     if (overall != null) {
       const tone = qaOverallLabel(overall);
@@ -3406,6 +3409,7 @@ async function downloadScorecardPdf(employees, qaEvals, monthKey) {
         doc.text(t.date || "", margin + 20, y);
         doc.setTextColor(0, 125, 90); doc.setFont("helvetica", "bold");
         doc.text(t.friendlyId || "", margin + 42, y);
+        if (t.sfNumber) { doc.setFont("helvetica", "normal"); doc.setTextColor(61, 81, 102); doc.text(`SF ${t.sfNumber}`, margin + 66, y); }
         doc.setTextColor(61, 81, 102); doc.setFont("helvetica", "normal"); doc.setFontSize(7.5);
         doc.text(t.resultRaw || "", pw - margin - 18, y, "right");
         drawBadge(pct + "%", tone, pw - margin, y);
@@ -3525,6 +3529,10 @@ function scorecardParsePivotQA(rows) {
     const eVal = (row[colEKey] || "").trim().toLowerCase();
     const dateVal = bVal;
     const friendlyId = (row["Friendly ID"] || row[rawKeys[3]] || "").trim();
+    // Salesforce case/ticket number — picked up from any column whose header mentions Salesforce,
+    // SFDC, or "case number/#", so it shows next to the TH id.
+    const sfKey = rawKeys.find((k) => /salesforce|sfdc|case\s*(number|#|no\b)/i.test(k));
+    const sfNumber = sfKey ? (row[sfKey] || "").trim() : "";
     const coachingNoteKey = rawKeys[5] || "Coaching Notes:";
 
     if (!aVal) continue;
@@ -3554,7 +3562,7 @@ function scorecardParsePivotQA(rows) {
     scores[currentName].count++;
     scores[currentName].points += pts;
     const coachingNote = (row[coachingNoteKey] || row["Coaching Notes:"] || "").trim();
-    tickets[currentName].push({ date: dateVal, friendlyId, resultRaw: (row[colEKey] || "").trim(), pts, coachingNote });
+    tickets[currentName].push({ date: dateVal, friendlyId, sfNumber, resultRaw: (row[colEKey] || "").trim(), pts, coachingNote });
   }
 
   const result = {};
@@ -4714,6 +4722,7 @@ function CaEvalTab({ employees, qaEvals, updateQaEval, updateEmployee, setTab })
                                     <span className="font-semibold text-slate-700">Ticket {i + 1}</span>
                                     <span className="text-slate-400 font-mono">{t.date}</span>
                                     {t.friendlyId && <span className="text-teal-700 font-mono">{t.friendlyId}</span>}
+                                    {t.sfNumber && <span className="text-slate-600 font-mono">SF {t.sfNumber}</span>}
                                     <span className={`ml-auto px-1.5 py-0.5 rounded font-semibold ${vTone}`}>{t.resultRaw} · {pct}%</span>
                                   </div>
                                   {t.coachingNote && <p className="text-xs text-slate-500 italic">{t.coachingNote}</p>}
